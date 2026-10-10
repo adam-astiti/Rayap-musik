@@ -21,6 +21,54 @@ const EXIT_USAGE: i32 = 2;
 /// Exit code for runtime errors.
 const EXIT_RUNTIME: i32 = 1;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const HELP: &str = "\
+rayap-musik — a local-first terminal music player for Linux
+
+USAGE:
+    rayap-musik <music-directory>
+    rayap-musik --help
+    rayap-musik --version
+
+ARGUMENTS:
+    <music-directory>    Root directory to browse. A leading `~` or `~/` is
+                         expanded using $HOME.
+
+OPTIONS:
+    -h, --help           Print this help and exit
+    -V, --version        Print version and exit
+
+SUPPORTED FORMATS:
+    .mp3 .flac .wav .ogg .oga .opus .m4a .mp4 .aac
+    (M4A/AAC is fully supported; Opus is a known gap)
+
+KEYS:
+    Up / Down       Move selection in the active panel
+    Tab             Switch focus between Library and Queue
+    Enter           Open folder / play selected track or queue item
+    Backspace       Go to parent directory (Library)
+    Space           Play / Pause
+    n               Next track
+    p               Previous / restart (restart if played > 3s)
+    + / =           Volume up (5% step)
+    -               Volume down (5% step)
+    q               Quit and stop playback
+
+EXIT CODES:
+    0    Success (including --help and --version)
+    1    Runtime error (e.g. terminal initialization failure)
+    2    Usage error (missing, unknown, or invalid directory)
+";
+
+fn print_help() {
+    println!("{HELP}");
+}
+
+fn print_version() {
+    println!("rayap-musik {VERSION}");
+}
+
 type Backend = CrosstermBackend<io::Stdout>;
 
 /// Owns the terminal and restores it on drop, so early returns and panics
@@ -55,10 +103,37 @@ fn main() {
 
 fn start() -> Result<(), i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let raw_root = match args.first() {
-        Some(arg) => arg.clone(),
-        None => {
+
+    let mut positional: Vec<String> = Vec::new();
+    for arg in &args {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_help();
+                return Ok(());
+            }
+            "-V" | "--version" => {
+                print_version();
+                return Ok(());
+            }
+            other if other.starts_with('-') && other.len() > 1 => {
+                eprintln!("rayap-musik: unknown option '{other}'");
+                eprintln!("Try 'rayap-musik --help' for more information.");
+                return Err(EXIT_USAGE);
+            }
+            other => positional.push(other.to_string()),
+        }
+    }
+
+    let raw_root = match positional.as_slice() {
+        [] => {
             eprintln!("rayap-musik: missing root directory argument");
+            eprintln!("Usage: rayap-musik <music-directory>");
+            eprintln!("Try 'rayap-musik --help' for more information.");
+            return Err(EXIT_USAGE);
+        }
+        [root] => root.clone(),
+        _ => {
+            eprintln!("rayap-musik: too many arguments");
             eprintln!("Usage: rayap-musik <music-directory>");
             return Err(EXIT_USAGE);
         }

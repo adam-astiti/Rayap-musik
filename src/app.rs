@@ -11,6 +11,16 @@ use crate::player::Player;
 
 pub const DEFAULT_VOLUME: u8 = 70;
 pub const VOLUME_STEP: u8 = 5;
+
+/// Apply a volume change, clamping the result to the 0..=100 range.
+pub fn change_volume(current: u8, delta: i8) -> u8 {
+    let value = if delta >= 0 {
+        current.saturating_add(delta as u8)
+    } else {
+        current.saturating_sub(delta.unsigned_abs())
+    };
+    value.min(100)
+}
 /// Threshold used by the previous/restart rule (FR-07).
 const RESTART_THRESHOLD: Duration = Duration::from_secs(3);
 
@@ -35,12 +45,12 @@ pub struct App {
 
 impl App {
     pub fn new(root: PathBuf) -> Self {
-        let (player, status) = match Player::new() {
+        let (player, player_error) = match Player::new() {
             Ok(player) => {
                 player.set_volume_percent(DEFAULT_VOLUME);
-                (Some(player), String::new())
+                (Some(player), None)
             }
-            Err(error) => (None, error.to_string()),
+            Err(error) => (None, Some(error.to_string())),
         };
 
         let mut app = Self {
@@ -54,10 +64,14 @@ impl App {
             playback: PlaybackState::default(),
             volume: DEFAULT_VOLUME,
             should_quit: false,
-            status,
+            status: String::new(),
             player,
         };
         app.reload_directory();
+        if let Some(error) = player_error {
+            // Surface the audio failure instead of the directory status.
+            app.status = format!("Audio unavailable: {error}");
+        }
         app
     }
 
@@ -122,8 +136,8 @@ impl App {
             Action::TogglePlay => self.toggle_play(),
             Action::NextTrack => self.next(),
             Action::PreviousTrack => self.previous(),
-            Action::VolumeUp => self.set_volume(self.volume.saturating_add(VOLUME_STEP)),
-            Action::VolumeDown => self.set_volume(self.volume.saturating_sub(VOLUME_STEP)),
+            Action::VolumeUp => self.set_volume(change_volume(self.volume, VOLUME_STEP as i8)),
+            Action::VolumeDown => self.set_volume(change_volume(self.volume, -(VOLUME_STEP as i8))),
             Action::Quit => self.should_quit = true,
             Action::Resize => {}
         }
@@ -342,5 +356,36 @@ impl App {
             player.set_volume_percent(self.volume);
         }
         self.status = format!("Volume: {}%", self.volume);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{change_volume, DEFAULT_VOLUME, VOLUME_STEP};
+
+    #[test]
+    fn volume_clamps_to_zero() {
+        let mut volume = DEFAULT_VOLUME;
+        for _ in 0..100 {
+            volume = change_volume(volume, -(VOLUME_STEP as i8));
+        }
+        assert_eq!(volume, 0);
+    }
+
+    #[test]
+    fn volume_clamps_to_one_hundred() {
+        let mut volume = DEFAULT_VOLUME;
+        for _ in 0..100 {
+            volume = change_volume(volume, VOLUME_STEP as i8);
+        }
+        assert_eq!(volume, 100);
+    }
+
+    #[test]
+    fn volume_step_is_five() {
+        assert_eq!(change_volume(70, 5), 75);
+        assert_eq!(change_volume(70, -5), 65);
+        assert_eq!(change_volume(3, -5), 0, "downwards step clamps at zero");
+        assert_eq!(change_volume(98, 5), 100, "upwards step clamps at 100");
     }
 }
