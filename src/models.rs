@@ -114,6 +114,101 @@ impl LibraryItem {
     }
 }
 
+/// In-memory playback queue. The queue is not persisted between sessions.
+#[derive(Debug, Clone, Default)]
+pub struct Queue {
+    tracks: Vec<Track>,
+    current: usize,
+}
+
+impl Queue {
+    pub fn from_tracks(tracks: Vec<Track>) -> Self {
+        Self { tracks, current: 0 }
+    }
+
+    pub fn tracks(&self) -> &[Track] {
+        &self.tracks
+    }
+
+    pub fn len(&self) -> usize {
+        self.tracks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tracks.is_empty()
+    }
+
+    pub fn current_index(&self) -> usize {
+        self.current
+    }
+
+    pub fn current(&self) -> Option<&Track> {
+        self.tracks.get(self.current)
+    }
+
+    pub fn set_current(&mut self, index: usize) {
+        if index < self.tracks.len() {
+            self.current = index;
+        }
+    }
+
+    pub fn next_index(&self) -> Option<usize> {
+        (self.current + 1 < self.tracks.len()).then_some(self.current + 1)
+    }
+
+    pub fn previous_index(&self) -> Option<usize> {
+        self.current.checked_sub(1)
+    }
+
+    /// Move to the next track. Returns `false` when already at the end.
+    pub fn advance(&mut self) -> bool {
+        match self.next_index() {
+            Some(index) => {
+                self.current = index;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Move to the previous track. Returns `false` when already at the start.
+    pub fn retreat(&mut self) -> bool {
+        match self.previous_index() {
+            Some(index) => {
+                self.current = index;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Decision for the previous button (FR-07).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviousAction {
+    /// Restart the current track from the beginning.
+    Restart,
+    /// Move to the previous track.
+    Previous,
+}
+
+/// Decide what the previous button should do.
+///
+/// Restart when the track has played for more than `threshold`, or when there
+/// is no previous track. Otherwise move to the previous track. `position` is
+/// the actual playback position, so pausing does not affect the decision.
+pub fn previous_action(
+    position: Duration,
+    has_previous: bool,
+    threshold: Duration,
+) -> PreviousAction {
+    if position > threshold || !has_previous {
+        PreviousAction::Restart
+    } else {
+        PreviousAction::Previous
+    }
+}
+
 /// A user intent derived from keyboard input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {

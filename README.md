@@ -2,9 +2,10 @@
 
 Local-first terminal music player for Linux, written in Rust.
 
-> Status: **Milestone 3 — single-track playback.** Browsing, metadata, sorting,
-> recursive scanning, and single-track playback (incl. M4A/AAC) work. Queue
-> management and auto-next are not implemented yet. See `docs/PRD.md`.
+> Status: **Milestone 4 — queue and transitions.** Browsing, metadata, sorting,
+> recursive scanning, playback (incl. M4A/AAC), recursive queue replacement,
+> auto-next, next/previous, and skip-on-failure all work. Final hardening and
+> docs are pending. See `docs/PRD.md`.
 
 ## Requirements
 
@@ -40,7 +41,7 @@ manually); Opus support depends on the Symphonia backend.
 |---|---|
 | `↑` / `↓` | Move selection in the active panel |
 | `Tab` | Switch focus between Library and Queue |
-| `Enter` | Open folder / play selected track |
+| `Enter` | Open folder / play selected track (Library) or selected queue item (Queue) |
 | `Backspace` | Go to parent directory (Library) |
 | `Space` | Play / Pause |
 | `n` | Next track |

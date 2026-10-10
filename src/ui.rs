@@ -72,8 +72,7 @@ fn panel_block(title: &str, focused: bool) -> Block<'static> {
 
 fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     let shown = app
-        .now_playing
-        .as_ref()
+        .current_track()
         .or_else(|| app.selected_item().and_then(LibraryItem::as_track));
 
     let lines = match shown {
@@ -209,10 +208,51 @@ fn scroll_offset(selected: usize, height: usize, len: usize) -> usize {
 fn draw_queue(frame: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == Focus::Queue;
     let title = if focused { "> Queue" } else { "  Queue" };
+    let block = panel_block(title, focused);
+
+    if app.queue.is_empty() {
+        frame.render_widget(
+            Paragraph::new("(empty)")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let offset = if focused {
+        scroll_offset(app.queue_selected, inner_height, app.queue.len())
+    } else {
+        0
+    };
+
+    let current = app.queue.current_index();
+    let lines: Vec<Line> = app
+        .queue
+        .tracks()
+        .iter()
+        .enumerate()
+        .map(|(index, track)| {
+            let marker = if index == current { ">" } else { " " };
+            let style = if focused && index == app.queue_selected {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else if index == current {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            Line::from(format!("{marker} {:>2}. {}", index + 1, track.title)).style(style)
+        })
+        .collect();
+
     frame.render_widget(
-        Paragraph::new("(empty)")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(panel_block(title, focused)),
+        Paragraph::new(lines)
+            .block(block)
+            .scroll((offset as u16, 0)),
         area,
     );
 }

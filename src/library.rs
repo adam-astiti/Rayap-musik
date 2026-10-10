@@ -234,6 +234,45 @@ pub fn scan_recursive(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Build a playback queue for a selected track (FR-05).
+///
+/// The selected track is first, followed by every other audio file in the
+/// selected track's directory subtree, in deterministic traversal order, with
+/// no duplicates. Only the subtree is scanned; unrelated directories are
+/// excluded.
+pub fn build_queue(selected: &Path) -> Vec<Track> {
+    let selected_track = read_track(selected);
+    let mut tracks = vec![selected_track.clone()];
+
+    let Some(parent) = selected_track.path.parent() else {
+        return tracks;
+    };
+
+    let mut rest = Vec::new();
+    collect_tracks(parent, &mut rest);
+    for track in rest {
+        if track.path != selected_track.path {
+            tracks.push(track);
+        }
+    }
+    tracks
+}
+
+/// Recursively collect tracks under `dir` in traversal order: subdirectories
+/// before files, names sorted case-insensitively, tracks sorted by number then
+/// file name (via [`list_directory`]).
+fn collect_tracks(dir: &Path, out: &mut Vec<Track>) {
+    let Ok(items) = list_directory(dir) else {
+        return;
+    };
+    for item in items {
+        match item {
+            LibraryItem::Directory { path, .. } => collect_tracks(&path, out),
+            LibraryItem::Track(track) => out.push(track),
+        }
+    }
+}
+
 fn scan_dir(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;

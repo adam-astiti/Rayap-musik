@@ -1,10 +1,12 @@
 //! Application state and decision making.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::library;
-use crate::models::{Action, Focus, LibraryItem, PlaybackState, Track};
+use crate::models::{
+    previous_action, Action, Focus, LibraryItem, PlaybackState, PreviousAction, Queue, Track,
+};
 use crate::player::Player;
 
 pub const DEFAULT_VOLUME: u8 = 70;
@@ -20,12 +22,14 @@ pub struct App {
     pub items: Vec<LibraryItem>,
     pub selected: usize,
     pub focus: Focus,
+    /// In-memory playback queue.
+    pub queue: Queue,
+    /// Selection index within the queue panel.
+    pub queue_selected: usize,
     pub playback: PlaybackState,
     pub volume: u8,
     pub should_quit: bool,
     pub status: String,
-    /// Track currently loaded into the player, if any.
-    pub now_playing: Option<Track>,
     player: Option<Player>,
 }
 
@@ -45,11 +49,12 @@ impl App {
             items: Vec::new(),
             selected: 0,
             focus: Focus::Library,
+            queue: Queue::default(),
+            queue_selected: 0,
             playback: PlaybackState::default(),
             volume: DEFAULT_VOLUME,
             should_quit: false,
             status,
-            now_playing: None,
             player,
         };
         app.reload_directory();
@@ -88,6 +93,10 @@ impl App {
         self.player.is_some()
     }
 
+    pub fn current_track(&self) -> Option<&Track> {
+        self.queue.current()
+    }
+
     pub fn position(&self) -> Option<Duration> {
         self.player
             .as_ref()
@@ -111,10 +120,8 @@ impl App {
             Action::Enter => self.enter(),
             Action::GoUp => self.go_to_parent(),
             Action::TogglePlay => self.toggle_play(),
+            Action::NextTrack => self.next(),
             Action::PreviousTrack => self.previous(),
-            Action::NextTrack => {
-                self.status = "Next track needs a queue (Milestone 4)".to_string();
-            }
             Action::VolumeUp => self.set_volume(self.volume.saturating_add(VOLUME_STEP)),
             Action::VolumeDown => self.set_volume(self.volume.saturating_sub(VOLUME_STEP)),
             Action::Quit => self.should_quit = true,
@@ -124,7 +131,7 @@ impl App {
 
     /// Poll the player for state changes. Called once per UI frame.
     pub fn tick(&mut self) {
-        if self.now_playing.is_none() {
+        if self.queue.is_empty() {
             return;
         }
         let (finished, paused) = match &self.player {
@@ -134,13 +141,9 @@ impl App {
 
         if finished {
             if self.playback != PlaybackState::Stopped {
+                // Mark stopped first so a finished track is only reported once.
                 self.playback = PlaybackState::Stopped;
-                let title = self
-                    .now_playing
-                    .as_ref()
-                    .map(|track| track.title.clone())
-                    .unwrap_or_default();
-                self.status = format!("Finished: {title}");
+                self.advance_or_stop();
             }
         } else if paused {
             self.playback = PlaybackState::Paused;
@@ -150,28 +153,40 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: i32) {
-        if self.focus == Focus::Library && !self.items.is_empty() {
-            let last = self.items.len() - 1;
-            let next = (self.selected as i32 + delta).clamp(0, last as i32);
-            self.selected = next as usize;
+        let (selected, len) = match self.focus {
+            Focus::Library => (self.selected, self.items.len()),
+            Focus::Queue => (self.queue_selected, self.queue.len()),
+        };
+        if len == 0 {
+            return;
+        }
+
+        let next = (selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
+        match self.focus {
+            Focus::Library => self.selected = next,
+            Focus::Queue => self.queue_selected = next,
         }
     }
 
     fn enter(&mut self) {
-        if self.focus != Focus::Library {
-            // Queue focus acts once the queue exists (Milestone 4).
-            return;
-        }
-        match self.selected_item() {
-            Some(LibraryItem::Directory { path, .. }) => {
-                self.current_dir = path.clone();
-                self.reload_directory();
+        match self.focus {
+            Focus::Library => match self.selected_item() {
+                Some(LibraryItem::Directory { path, .. }) => {
+                    self.current_dir = path.clone();
+                    self.reload_directory();
+                }
+                Some(LibraryItem::Track(track)) => {
+                    let path = track.path.clone();
+                    self.replace_queue_and_play(&path);
+                }
+                None => {}
+            },
+            Focus::Queue => {
+                if self.queue_selected < self.queue.len() {
+                    self.queue.set_current(self.queue_selected);
+                    self.start_playback();
+                }
             }
-            Some(LibraryItem::Track(track)) => {
-                let track = track.clone();
-                self.play_track(&track);
-            }
-            None => {}
         }
     }
 
@@ -189,21 +204,121 @@ impl App {
         }
     }
 
+    /// Replace the queue with the subtree of `path` and start playing (FR-05).
+    fn replace_queue_and_play(&mut self, path: &Path) {
+        let tracks = library::build_queue(path);
+        self.queue = Queue::from_tracks(tracks);
+        self.queue_selected = 0;
+        self.start_playback();
+    }
+
+    /// Play the current queue item, skipping any that fail to play (FR-06).
+    ///
+    /// The search is bounded by the queue length, so a queue where every track
+    /// fails terminates instead of looping forever.
+    fn start_playback(&mut self) {
+        let len = self.queue.len();
+        let mut index = self.queue.current_index();
+
+        while index < len {
+            self.queue.set_current(index);
+            let Some(track) = self.queue.current().cloned() else {
+                break;
+            };
+
+            match self.try_play(&track) {
+                Ok(()) => {
+                    self.playback = PlaybackState::Playing;
+                    self.status = format!("Playing: {} ({}/{})", track.title, index + 1, len);
+                    return;
+                }
+                Err(message) => {
+                    self.status = format!("Skipped {}: {message}", track.title);
+                }
+            }
+            index += 1;
+        }
+
+        self.stop_playback("All tracks in queue failed");
+    }
+
+    fn try_play(&mut self, track: &Track) -> Result<(), String> {
+        match self.player.as_mut() {
+            Some(player) => {
+                player
+                    .play_path(&track.path)
+                    .map_err(|error| error.to_string())?;
+                player.set_volume_percent(self.volume);
+                Ok(())
+            }
+            None => Err("audio backend unavailable".to_string()),
+        }
+    }
+
+    fn stop_playback(&mut self, message: &str) {
+        if let Some(player) = &mut self.player {
+            player.stop();
+        }
+        self.playback = PlaybackState::Stopped;
+        self.status = message.to_string();
+    }
+
+    fn advance_or_stop(&mut self) {
+        if self.queue.advance() {
+            self.queue_selected = self.queue.current_index();
+            self.start_playback();
+        } else {
+            self.stop_playback("End of queue");
+        }
+    }
+
+    fn next(&mut self) {
+        if self.queue.is_empty() {
+            self.status = "Queue is empty".to_string();
+            return;
+        }
+        self.advance_or_stop();
+    }
+
+    /// Previous/restart behaviour (FR-07).
+    fn previous(&mut self) {
+        if self.queue.is_empty() {
+            self.status = "Queue is empty".to_string();
+            return;
+        }
+
+        let position = self
+            .player
+            .as_ref()
+            .map(Player::position)
+            .unwrap_or_default();
+        let has_previous = self.queue.previous_index().is_some();
+
+        match previous_action(position, has_previous, RESTART_THRESHOLD) {
+            PreviousAction::Restart => {
+                self.start_playback();
+            }
+            PreviousAction::Previous => {
+                self.queue.retreat();
+                self.queue_selected = self.queue.current_index();
+                self.start_playback();
+            }
+        }
+    }
+
     fn toggle_play(&mut self) {
         let finished = self
             .player
             .as_ref()
             .map(|player| player.is_finished())
             .unwrap_or(false);
-
         let has_track = self.player.as_ref().map(Player::has_track).unwrap_or(false);
 
         if !has_track || finished {
-            // Start (or restart) the selected track.
-            if let Some(LibraryItem::Track(track)) = self.selected_item().cloned() {
-                self.play_track(&track);
-            } else if let Some(track) = self.now_playing.clone() {
-                self.play_track(&track);
+            if !self.queue.is_empty() {
+                self.start_playback();
+            } else if let Some(LibraryItem::Track(track)) = self.selected_item().cloned() {
+                self.replace_queue_and_play(&track.path);
             }
             return;
         }
@@ -217,57 +332,6 @@ impl App {
                 player.pause();
                 self.playback = PlaybackState::Paused;
                 self.status = "Paused".to_string();
-            }
-        }
-    }
-
-    /// Previous/restart behaviour (FR-07).
-    ///
-    /// With a single track there is no previous item, so both branches restart
-    /// the current track.
-    fn previous(&mut self) {
-        let Some(track) = self.now_playing.clone() else {
-            self.status = "Nothing playing".to_string();
-            return;
-        };
-
-        let position = self
-            .player
-            .as_ref()
-            .map(Player::position)
-            .unwrap_or_default();
-
-        if position > RESTART_THRESHOLD {
-            self.play_track(&track);
-            self.status = format!("Restarted: {}", track.title);
-        } else {
-            self.play_track(&track);
-            self.status = format!("Restarted: {} (no previous track)", track.title);
-        }
-    }
-
-    fn play_track(&mut self, track: &Track) {
-        let result = self
-            .player
-            .as_mut()
-            .map(|player| player.play_path(&track.path));
-
-        match result {
-            None => {
-                self.status = "Audio backend unavailable".to_string();
-            }
-            Some(Ok(())) => {
-                if let Some(player) = &self.player {
-                    player.set_volume_percent(self.volume);
-                }
-                self.now_playing = Some(track.clone());
-                self.playback = PlaybackState::Playing;
-                self.status = format!("Playing: {}", track.title);
-            }
-            Some(Err(error)) => {
-                self.now_playing = None;
-                self.playback = PlaybackState::Stopped;
-                self.status = error.to_string();
             }
         }
     }
