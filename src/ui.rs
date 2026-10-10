@@ -71,7 +71,12 @@ fn panel_block(title: &str, focused: bool) -> Block<'static> {
 }
 
 fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
-    let lines = match app.selected_item().and_then(LibraryItem::as_track) {
+    let shown = app
+        .now_playing
+        .as_ref()
+        .or_else(|| app.selected_item().and_then(LibraryItem::as_track));
+
+    let lines = match shown {
         Some(track) => vec![
             Line::from(Span::styled(
                 track.title.clone(),
@@ -105,10 +110,20 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_progress(frame: &mut Frame, area: Rect, app: &App) {
+    let position = app.position();
+    let duration = app.duration();
+    let ratio = match (position, duration) {
+        (Some(position), Some(duration)) if !duration.is_zero() => {
+            position.as_secs_f64() / duration.as_secs_f64()
+        }
+        _ => 0.0,
+    };
     let text = Line::from(format!(
-        "00:00 / --:--    Volume: {}%    [{}]",
+        "{} / {}    Volume: {}%    [{}]",
+        format_duration(position),
+        format_duration(duration),
         app.volume,
-        progress_bar(0.0, 20)
+        progress_bar(ratio, 20)
     ));
     frame.render_widget(
         Paragraph::new(text).block(panel_block("Progress", false)),

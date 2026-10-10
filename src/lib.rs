@@ -7,4 +7,5 @@ pub mod app;
 pub mod input;
 pub mod library;
 pub mod models;
+pub mod player;
 pub mod ui;

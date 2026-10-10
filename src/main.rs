@@ -94,6 +94,7 @@ fn start() -> Result<(), i32> {
 
 fn run(terminal: &mut Terminal<Backend>, mut app: App) -> io::Result<()> {
     while !app.should_quit {
+        app.tick();
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
         if event::poll(EVENT_POLL_INTERVAL)? {

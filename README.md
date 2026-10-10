@@ -2,9 +2,9 @@
 
 Local-first terminal music player for Linux, written in Rust.
 
-> Status: **Milestone 2 — filesystem browser.** Browsing, metadata, sorting,
-> and recursive scanning work. Audio playback and queue management are not
-> implemented yet. See `docs/PRD.md` for the full plan.
+> Status: **Milestone 3 — single-track playback.** Browsing, metadata, sorting,
+> recursive scanning, and single-track playback (incl. M4A/AAC) work. Queue
+> management and auto-next are not implemented yet. See `docs/PRD.md`.
 
 ## Requirements
 
@@ -30,7 +30,9 @@ A leading `~` is expanded using `$HOME`. Missing arguments, missing paths, and
 non-directory paths print an error and exit with a non-zero code.
 
 Supported audio extensions: `.mp3`, `.flac`, `.wav`, `.ogg`, `.oga`, `.opus`,
-`.m4a`, `.mp4`, `.aac`. Non-audio files and symlinks are ignored.
+`.m4a`, `.mp4`, `.aac`. Non-audio files and symlinks are ignored. MP3, FLAC,
+WAV, OGG Vorbis and **M4A/AAC are decoded via Symphonia** (M4A verified
+manually); Opus support depends on the Symphonia backend.
 
 ## Keys
 
