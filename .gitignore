@@ -1,0 +1,17 @@
+# Rust build output
+/target
+
+# Debian package output
+/dist
+
+# Rust backup files
+**/*.rs.bk
+
+# Cargo lock is committed for binaries; uncomment to ignore it instead:
+# Cargo.lock
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/

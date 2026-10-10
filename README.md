@@ -34,6 +34,47 @@ cargo build --release
 
 The binary is produced at `target/release/rayap-musik`.
 
+## Install
+
+### Option A — Debian package (.deb)
+
+Build the package, then install it with `apt` (this also resolves the ALSA
+runtime dependency):
+
+```sh
+packaging/build-deb.sh
+sudo apt install ./dist/rayap-musik_*.deb
+```
+
+- Installs the binary to `/usr/bin/rayap-musik`.
+- Installs documentation to `/usr/share/doc/rayap-musik/`.
+- Runtime dependencies: `libasound2t64` (Debian 13+) or `libasound2`, plus
+  `libc6`.
+- Remove with `sudo apt remove rayap-musik`.
+
+To upgrade after changing the code, rebuild and run the same `apt install`
+command again.
+
+### Option B — Install with cargo (no root required)
+
+```sh
+cargo install --path . --root "$HOME/.local" --locked
+```
+
+This places the binary in `~/.local/bin/rayap-musik`. Make sure `~/.local/bin`
+is on your `PATH` (add `export PATH="$HOME/.local/bin:$PATH"` to your shell
+profile if needed).
+
+To reinstall after changing the code:
+
+```sh
+cargo install --path . --root "$HOME/.local" --locked --force
+```
+
+> Always pass `--locked`: `Cargo.lock` pins dependency versions that are
+> compatible with Rust 1.85. Without it, `cargo install` may resolve newer
+> crates that require a newer compiler.
+
 ## Usage
 
 ```sh
@@ -136,6 +177,7 @@ rule. Tests that require an audio device are performed manually.
 
 ## Documentation
 
+- `README.md` (this file) — install, usage, formats, keymap, manual test plan
 - `docs/PRD.md` — product requirements
 - `docs/QA.md` — QA report, test evidence, and traceability matrix
 
@@ -154,6 +196,8 @@ src/
 docs/
   PRD.md       product requirements
   QA.md        quality assurance report
+packaging/
+  build-deb.sh builds a Debian package into dist/
 tests/
   library_tests.rs
   queue_tests.rs
