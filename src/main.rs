@@ -1,14 +1,7 @@
 //! Rayap Musik — local-first terminal music player for Linux.
-//!
-//! Milestone 1: application lifecycle and UI shell. No library scanning or
-//! audio playback yet.
-
-mod app;
-mod input;
-mod models;
-mod ui;
 
 use std::io::{self, stdout};
+use std::path::Path;
 use std::time::Duration;
 
 use crossterm::event::{self, Event};
@@ -19,9 +12,14 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::App;
+use rayap_musik::{app::App, input, library, models::Action, ui};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Exit code for usage / argument errors.
+const EXIT_USAGE: i32 = 2;
+/// Exit code for runtime errors.
+const EXIT_RUNTIME: i32 = 1;
 
 type Backend = CrosstermBackend<io::Stdout>;
 
@@ -49,14 +47,49 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn main() -> io::Result<()> {
-    let root = std::env::args().nth(1);
+fn main() {
+    if let Err(code) = start() {
+        std::process::exit(code);
+    }
+}
 
-    let mut guard = TerminalGuard::enter()?;
+fn start() -> Result<(), i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_root = match args.first() {
+        Some(arg) => arg.clone(),
+        None => {
+            eprintln!("rayap-musik: missing root directory argument");
+            eprintln!("Usage: rayap-musik <music-directory>");
+            return Err(EXIT_USAGE);
+        }
+    };
+
+    let expanded = library::expand_tilde(&raw_root);
+    let root = match library::validate_root(Path::new(&expanded)) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("rayap-musik: {error}");
+            return Err(EXIT_USAGE);
+        }
+    };
+
+    let mut guard = match TerminalGuard::enter() {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("rayap-musik: failed to initialize terminal: {error}");
+            return Err(EXIT_RUNTIME);
+        }
+    };
+
     let app = App::new(root);
     let result = run(&mut guard.terminal, app);
     drop(guard);
-    result
+
+    if let Err(error) = result {
+        eprintln!("rayap-musik: {error}");
+        return Err(EXIT_RUNTIME);
+    }
+    Ok(())
 }
 
 fn run(terminal: &mut Terminal<Backend>, mut app: App) -> io::Result<()> {
@@ -70,7 +103,7 @@ fn run(terminal: &mut Terminal<Backend>, mut app: App) -> io::Result<()> {
                         app.handle_action(action);
                     }
                 }
-                Event::Resize(_, _) => app.handle_action(models::Action::Resize),
+                Event::Resize(_, _) => app.handle_action(Action::Resize),
                 _ => {}
             }
         }

@@ -2,8 +2,9 @@
 
 Local-first terminal music player for Linux, written in Rust.
 
-> Status: **Milestone 1 — UI shell.** The library browser and audio playback
-> are not implemented yet. See `docs/PRD.md` for the full plan.
+> Status: **Milestone 2 — filesystem browser.** Browsing, metadata, sorting,
+> and recursive scanning work. Audio playback and queue management are not
+> implemented yet. See `docs/PRD.md` for the full plan.
 
 ## Requirements
 
@@ -24,8 +25,12 @@ cargo build --release
 cargo run -- ~/Music
 ```
 
-The root directory argument is currently stored for display only. Validation
-and browsing arrive in Milestone 2.
+The root directory argument is required and validated before the UI starts.
+A leading `~` is expanded using `$HOME`. Missing arguments, missing paths, and
+non-directory paths print an error and exit with a non-zero code.
+
+Supported audio extensions: `.mp3`, `.flac`, `.wav`, `.ogg`, `.oga`, `.opus`,
+`.m4a`, `.mp4`, `.aac`. Non-audio files and symlinks are ignored.
 
 ## Keys
 
