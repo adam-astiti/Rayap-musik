@@ -6,10 +6,10 @@ use crate::models::{Action, LibraryView};
 
 /// Map a crossterm key event to an [`Action`].
 ///
-/// When `searching` is true, printable characters feed the search query instead
-/// of triggering normal bindings. Returns `None` for unbound keys and for key
-/// release/repeat events that should be ignored.
-pub fn map_key(key: KeyEvent, searching: bool) -> Option<Action> {
+/// When `text_mode` is true (search or a prompt is active), printable
+/// characters feed the text buffer instead of triggering normal bindings.
+/// Returns `None` for unbound keys and for key release/repeat events.
+pub fn map_key(key: KeyEvent, text_mode: bool) -> Option<Action> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
@@ -21,13 +21,13 @@ pub fn map_key(key: KeyEvent, searching: bool) -> Option<Action> {
         return Some(Action::Quit);
     }
 
-    if searching {
+    if text_mode {
         return match key.code {
             KeyCode::Up => Some(Action::SelectUp),
             KeyCode::Down => Some(Action::SelectDown),
-            KeyCode::Char(ch) => Some(Action::SearchChar(ch)),
-            KeyCode::Backspace => Some(Action::SearchBackspace),
-            KeyCode::Esc => Some(Action::SearchCancel),
+            KeyCode::Char(ch) => Some(Action::TypeChar(ch)),
+            KeyCode::Backspace => Some(Action::DeleteChar),
+            KeyCode::Esc => Some(Action::Cancel),
             KeyCode::Enter => Some(Action::Enter),
             _ => None,
         };
@@ -38,6 +38,7 @@ pub fn map_key(key: KeyEvent, searching: bool) -> Option<Action> {
         KeyCode::Down => Action::SelectDown,
         KeyCode::Tab => Action::NextFocus,
         KeyCode::Enter => Action::Enter,
+        KeyCode::Esc | KeyCode::Backspace => Action::Back,
         KeyCode::Char(' ') => Action::TogglePlay,
         KeyCode::Char('n') => Action::NextTrack,
         KeyCode::Char('p') => Action::PreviousTrack,
@@ -49,6 +50,24 @@ pub fn map_key(key: KeyEvent, searching: bool) -> Option<Action> {
         KeyCode::Char('2') => Action::SwitchView(LibraryView::Albums),
         KeyCode::Char('3') => Action::SwitchView(LibraryView::Artists),
         KeyCode::Char('4') => Action::SwitchView(LibraryView::Playlists),
+        KeyCode::Char('a') => Action::AddToQueue,
+        KeyCode::Char('N') => Action::PlayNext,
+        KeyCode::Char('d') => Action::RemoveFromQueue,
+        KeyCode::Char('s') => Action::ToggleShuffle,
+        KeyCode::Char('R') => Action::CycleRepeat,
+        KeyCode::Char('m') => Action::TogglePlayMode,
+        KeyCode::Char('?') => Action::ToggleHelp,
+        KeyCode::Char('T') => Action::CycleTheme,
+        KeyCode::Char('c') => Action::NewPlaylist,
+        KeyCode::Char('e') => Action::Rename,
+        KeyCode::Char('D') => Action::Duplicate,
+        KeyCode::Char('x') => Action::Delete,
+        KeyCode::Char('P') => Action::AddToPlaylist,
+        KeyCode::Char('I') => Action::Import,
+        KeyCode::Char('E') => Action::Export,
+        KeyCode::Char('J') => Action::MoveDown,
+        KeyCode::Char('K') => Action::MoveUp,
+        KeyCode::Char('S') => Action::Sort,
         _ => return None,
     };
 

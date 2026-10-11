@@ -1,16 +1,20 @@
 //! Application state and decision making.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::artwork::{self, Artwork};
 use crate::catalog::{self, Catalog};
 use crate::db::Db;
 use crate::indexer::{IndexEvent, Indexer};
+use crate::library;
+use crate::m3u;
 use crate::models::{
     previous_action, Action, Focus, LibraryView, PlaybackState, Playlist, PreviousAction, Queue,
-    Track,
+    RepeatMode, Track,
 };
 use crate::player::Player;
+use crate::theme::{self, Theme};
 
 pub const DEFAULT_VOLUME: u8 = 70;
 pub const VOLUME_STEP: u8 = 5;
@@ -27,6 +31,21 @@ pub fn change_volume(current: u8, delta: i8) -> u8 {
 /// Threshold used by the previous/restart rule (FR-07).
 const RESTART_THRESHOLD: Duration = Duration::from_secs(3);
 
+/// A pending text prompt (playlist name, or M3U import/export path).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PromptKind {
+    New,
+    Rename(i64),
+    Export(i64),
+    Import,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Prompt {
+    kind: PromptKind,
+    buffer: String,
+}
+
 pub struct App {
     /// Validated root directory.
     pub root: PathBuf,
@@ -36,6 +55,10 @@ pub struct App {
     pub catalog: Catalog,
     /// Persisted playlists (names only; membership is read on demand).
     pub playlists: Vec<Playlist>,
+    /// The playlist currently being browsed, if any.
+    pub open_playlist: Option<Playlist>,
+    /// Tracks of the currently browsed playlist.
+    pub open_tracks: Vec<Track>,
     /// Current global-search query (empty when not searching).
     pub search_query: String,
     /// Results for the current search query.
@@ -49,15 +72,26 @@ pub struct App {
     pub queue_selected: usize,
     pub playback: PlaybackState,
     pub volume: u8,
+    pub repeat: RepeatMode,
+    pub play_mode: bool,
+    pub show_help: bool,
+    pub theme: Theme,
+    /// Artwork for the current track, resolved once per track.
+    pub artwork: Option<Artwork>,
     pub should_quit: bool,
     pub status: String,
     player: Option<Player>,
     db: Option<Db>,
     indexer: Option<Indexer>,
+    artwork_path: Option<PathBuf>,
+    pending_add: Option<Vec<Track>>,
+    picker_return: Option<LibraryView>,
+    confirm_delete: Option<i64>,
+    prompt: Option<Prompt>,
 }
 
 impl App {
-    pub fn new(root: PathBuf, volume: u8, db: Option<Db>) -> Self {
+    pub fn new(root: PathBuf, volume: u8, theme_name: &str, db: Option<Db>) -> Self {
         let volume = volume.min(100);
         let (player, player_error) = match Player::new() {
             Ok(player) => {
@@ -78,6 +112,8 @@ impl App {
             view: LibraryView::Songs,
             catalog: Catalog::default(),
             playlists: Vec::new(),
+            open_playlist: None,
+            open_tracks: Vec::new(),
             search_query: String::new(),
             search_results: Vec::new(),
             selected: 0,
@@ -86,15 +122,24 @@ impl App {
             queue_selected: 0,
             playback: PlaybackState::default(),
             volume,
+            repeat: RepeatMode::default(),
+            play_mode: false,
+            show_help: false,
+            theme: theme::theme_from_name(theme_name),
+            artwork: None,
             should_quit: false,
             status: String::new(),
             player,
             db,
             indexer,
+            artwork_path: None,
+            pending_add: None,
+            picker_return: None,
+            confirm_delete: None,
+            prompt: None,
         };
         app.reload_catalog();
         if let Some(error) = player_error {
-            // Surface the audio failure instead of the directory status.
             app.status = format!("Audio unavailable: {error}");
         }
         app
@@ -119,8 +164,45 @@ impl App {
         self.player.as_ref().and_then(Player::duration)
     }
 
-    /// Number of selectable items in the active library view.
+    /// Resolve (and cache) artwork for the current track.
+    fn refresh_artwork(&mut self) {
+        let Some(track) = self.current_track().cloned() else {
+            self.artwork = None;
+            self.artwork_path = None;
+            return;
+        };
+        if self.artwork_path.as_deref() == Some(track.path.as_path()) {
+            return;
+        }
+        self.artwork = Some(artwork::resolve(&track));
+        self.artwork_path = Some(track.path);
+    }
+
+    /// Whether the app is capturing text (search query or a prompt).
+    pub fn text_input_active(&self) -> bool {
+        self.view == LibraryView::Search || self.prompt.is_some()
+    }
+
+    /// Whether a playlist picker is active (choosing a target playlist).
+    pub fn picker_active(&self) -> bool {
+        self.pending_add.is_some()
+    }
+
+    /// Text shown while a prompt is active, for the UI.
+    pub fn prompt_display(&self) -> Option<String> {
+        self.prompt
+            .as_ref()
+            .map(|prompt| format!("{}: {}\u{2588}", prompt_label(&prompt.kind), prompt.buffer))
+    }
+
+    /// Number of selectable items in the active library panel.
     pub fn library_len(&self) -> usize {
+        if self.picker_active() {
+            return self.playlists.len();
+        }
+        if self.open_playlist.is_some() {
+            return self.open_tracks.len();
+        }
         match self.view {
             LibraryView::Songs => self.catalog.songs.len(),
             LibraryView::Albums => self.catalog.albums.len(),
@@ -130,13 +212,11 @@ impl App {
         }
     }
 
-    /// Whether the app is currently capturing text for the search query.
-    pub fn is_searching(&self) -> bool {
-        self.view == LibraryView::Search
-    }
-
     /// The selected library entry as a single song, when it is one.
     fn selected_song(&self) -> Option<Track> {
+        if self.open_playlist.is_some() {
+            return self.open_tracks.get(self.selected).cloned();
+        }
         match self.view {
             LibraryView::Songs => self.catalog.songs.get(self.selected).cloned(),
             LibraryView::Search => match self.search_results.get(self.selected) {
@@ -156,7 +236,14 @@ impl App {
                 self.focus = self.focus.next();
                 self.status = format!("Focus: {}", self.focus.label());
             }
-            Action::Enter => self.enter(),
+            Action::Enter => {
+                if self.prompt.is_some() {
+                    self.commit_prompt();
+                } else {
+                    self.enter();
+                }
+            }
+            Action::Back => self.go_back(),
             Action::TogglePlay => self.toggle_play(),
             Action::NextTrack => self.next(),
             Action::PreviousTrack => self.previous(),
@@ -165,9 +252,27 @@ impl App {
             Action::Rescan => self.rescan_library(),
             Action::SwitchView(view) => self.switch_view(view),
             Action::StartSearch => self.start_search(),
-            Action::SearchChar(ch) => self.type_search_char(ch),
-            Action::SearchBackspace => self.search_backspace(),
-            Action::SearchCancel => self.search_cancel(),
+            Action::TypeChar(ch) => self.type_char(ch),
+            Action::DeleteChar => self.delete_char(),
+            Action::Cancel => self.cancel_text_input(),
+            Action::PlayNext => self.play_next(),
+            Action::AddToQueue => self.add_to_queue(),
+            Action::RemoveFromQueue => self.remove_from_queue(),
+            Action::ToggleShuffle => self.toggle_shuffle(),
+            Action::CycleRepeat => self.cycle_repeat(),
+            Action::TogglePlayMode => self.toggle_play_mode(),
+            Action::ToggleHelp => self.toggle_help(),
+            Action::CycleTheme => self.cycle_theme(),
+            Action::NewPlaylist => self.begin_prompt(PromptKind::New),
+            Action::Rename => self.begin_rename(),
+            Action::Duplicate => self.duplicate_selected(),
+            Action::Delete => self.delete_selected(),
+            Action::AddToPlaylist => self.begin_add_to_playlist(),
+            Action::Import => self.begin_prompt(PromptKind::Import),
+            Action::Export => self.begin_export(),
+            Action::MoveDown => self.move_track(1),
+            Action::MoveUp => self.move_track(-1),
+            Action::Sort => self.sort_open_playlist(),
             Action::Quit => self.should_quit = true,
             Action::Resize => {}
         }
@@ -177,6 +282,7 @@ impl App {
     /// per UI frame.
     pub fn tick(&mut self) {
         self.drain_indexer();
+        self.refresh_artwork();
         if self.queue.is_empty() {
             return;
         }
@@ -189,7 +295,7 @@ impl App {
             if self.playback != PlaybackState::Stopped {
                 // Mark stopped first so a finished track is only reported once.
                 self.playback = PlaybackState::Stopped;
-                self.advance_or_stop();
+                self.on_finished();
             }
         } else if paused {
             self.playback = PlaybackState::Paused;
@@ -209,7 +315,10 @@ impl App {
 
         let next = (selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
         match self.focus {
-            Focus::Library => self.selected = next,
+            Focus::Library => {
+                self.selected = next;
+                self.confirm_delete = None;
+            }
             Focus::Queue => self.queue_selected = next,
         }
     }
@@ -217,6 +326,12 @@ impl App {
     fn switch_view(&mut self, view: LibraryView) {
         self.view = view;
         self.selected = 0;
+        self.open_playlist = None;
+        self.open_tracks.clear();
+        self.pending_add = None;
+        self.picker_return = None;
+        self.confirm_delete = None;
+        self.prompt = None;
         self.search_query.clear();
         self.search_results.clear();
         self.status = view.label().to_string();
@@ -225,36 +340,55 @@ impl App {
     fn start_search(&mut self) {
         self.view = LibraryView::Search;
         self.selected = 0;
+        self.open_playlist = None;
+        self.open_tracks.clear();
+        self.pending_add = None;
+        self.picker_return = None;
+        self.confirm_delete = None;
+        self.prompt = None;
         self.search_query.clear();
         self.search_results.clear();
         self.status = "Search: type to filter".to_string();
     }
 
-    fn type_search_char(&mut self, ch: char) {
-        self.search_query.push(ch);
-        self.selected = 0;
-        self.refresh_search();
+    fn type_char(&mut self, ch: char) {
+        if self.view == LibraryView::Search {
+            self.search_query.push(ch);
+            self.selected = 0;
+            self.refresh_search();
+        } else if let Some(prompt) = &mut self.prompt {
+            prompt.buffer.push(ch);
+        }
     }
 
-    fn search_backspace(&mut self) {
-        self.search_query.pop();
-        self.selected = 0;
-        self.refresh_search();
+    fn delete_char(&mut self) {
+        if self.view == LibraryView::Search {
+            self.search_query.pop();
+            self.selected = 0;
+            self.refresh_search();
+        } else if let Some(prompt) = &mut self.prompt {
+            prompt.buffer.pop();
+        }
     }
 
-    fn search_cancel(&mut self) {
-        self.view = LibraryView::Songs;
-        self.search_query.clear();
-        self.search_results.clear();
-        self.selected = 0;
-        self.status = "Search cancelled".to_string();
+    fn cancel_text_input(&mut self) {
+        if self.view == LibraryView::Search {
+            self.view = LibraryView::Songs;
+            self.search_query.clear();
+            self.search_results.clear();
+            self.selected = 0;
+            self.status = "Search cancelled".to_string();
+        } else if self.prompt.is_some() {
+            self.prompt = None;
+            self.status = "Cancelled".to_string();
+        }
     }
 
     fn refresh_search(&mut self) {
         self.search_results = catalog::search(&self.catalog, &self.playlists, &self.search_query);
     }
 
-    /// Rebuild the in-memory catalog and playlist list from the database.
+    /// Rebuild the in-memory catalog from the database.
     fn reload_catalog(&mut self) {
         self.catalog = match &self.db {
             Some(db) => db
@@ -263,10 +397,22 @@ impl App {
                 .unwrap_or_default(),
             None => Catalog::default(),
         };
+        self.reload_playlists();
+    }
+
+    /// Reload playlist names and, if a playlist is open, its tracks.
+    fn reload_playlists(&mut self) {
         self.playlists = match &self.db {
             Some(db) => db.list_playlists().unwrap_or_default(),
             None => Vec::new(),
         };
+        if let Some(playlist) = self.open_playlist.clone() {
+            self.open_tracks = self
+                .db
+                .as_ref()
+                .and_then(|db| db.playlist_tracks(playlist.id).ok())
+                .unwrap_or_default();
+        }
         self.selected = self.selected.min(self.library_len().saturating_sub(1));
         self.refresh_search();
     }
@@ -296,10 +442,15 @@ impl App {
                 IndexEvent::ScanCompleted { tracks } => {
                     let count = tracks.len();
                     match &mut self.db {
-                        Some(db) => match db.sync_tracks(&tracks) {
-                            Ok(()) => self.status = format!("Indexed {count} track(s)"),
-                            Err(error) => self.status = format!("Index write failed: {error}"),
-                        },
+                        Some(db) => {
+                            match db.sync_tracks(&tracks) {
+                                Ok(()) => self.status = format!("Indexed {count} track(s)"),
+                                Err(error) => self.status = format!("Index write failed: {error}"),
+                            }
+                            if let Err(error) = db.remove_unavailable_from_playlists() {
+                                self.status = format!("Playlist cleanup failed: {error}");
+                            }
+                        }
                         None => self.status = format!("Indexed {count} track(s) (not persisted)"),
                     }
                     self.reload_catalog();
@@ -324,46 +475,98 @@ impl App {
     }
 
     fn enter_library(&mut self) {
+        if let Some(tracks) = self.pending_add.clone() {
+            self.commit_add(tracks);
+            return;
+        }
+        if let Some(playlist) = self.open_playlist.clone() {
+            let tracks = self
+                .db
+                .as_ref()
+                .and_then(|db| db.playlist_tracks(playlist.id).ok())
+                .unwrap_or_default();
+            self.play_now(tracks);
+            return;
+        }
+        if self.view == LibraryView::Playlists {
+            if let Some(playlist) = self.playlists.get(self.selected).cloned() {
+                self.open_playlist_detail(playlist);
+            }
+            return;
+        }
+        if let Some(tracks) = self.selected_tracks() {
+            self.play_now(tracks);
+        }
+    }
+
+    /// The tracks represented by the current selection (single song, whole
+    /// album/artist/playlist), in deterministic order.
+    fn selected_tracks(&self) -> Option<Vec<Track>> {
+        if self.picker_active() {
+            return None;
+        }
+        if self.open_playlist.is_some() {
+            return self
+                .open_tracks
+                .get(self.selected)
+                .map(|track| vec![track.clone()]);
+        }
         match self.view {
-            LibraryView::Songs => {
-                if let Some(track) = self.catalog.songs.get(self.selected).cloned() {
-                    self.play_now(vec![track]);
-                }
-            }
-            LibraryView::Albums => {
-                if let Some(album) = self.catalog.albums.get(self.selected) {
-                    self.play_now(album.tracks.clone());
-                }
-            }
-            LibraryView::Artists => {
-                if let Some(artist) = self.catalog.artists.get(self.selected) {
-                    self.play_now(artist.tracks.clone());
-                }
-            }
-            LibraryView::Playlists => {
-                if let Some(id) = self.playlists.get(self.selected).map(|p| p.id) {
-                    let tracks = self
-                        .db
-                        .as_ref()
-                        .and_then(|db| db.playlist_tracks(id).ok())
-                        .unwrap_or_default();
-                    self.play_now(tracks);
-                }
-            }
+            LibraryView::Songs => self
+                .catalog
+                .songs
+                .get(self.selected)
+                .map(|track| vec![track.clone()]),
+            LibraryView::Albums => self
+                .catalog
+                .albums
+                .get(self.selected)
+                .map(|album| album.tracks.clone()),
+            LibraryView::Artists => self
+                .catalog
+                .artists
+                .get(self.selected)
+                .map(|artist| artist.tracks.clone()),
+            LibraryView::Playlists => self
+                .playlists
+                .get(self.selected)
+                .and_then(|playlist| self.playlist_tracks(playlist.id)),
             LibraryView::Search => match self.search_results.get(self.selected).cloned() {
-                Some(catalog::SearchEntry::Song(track)) => self.play_now(vec![track]),
-                Some(catalog::SearchEntry::Album(album)) => self.play_now(album.tracks),
-                Some(catalog::SearchEntry::Artist(artist)) => self.play_now(artist.tracks),
-                Some(catalog::SearchEntry::Playlist(playlist)) => {
-                    let tracks = self
-                        .db
-                        .as_ref()
-                        .and_then(|db| db.playlist_tracks(playlist.id).ok())
-                        .unwrap_or_default();
-                    self.play_now(tracks);
-                }
-                None => {}
+                Some(catalog::SearchEntry::Song(track)) => Some(vec![track]),
+                Some(catalog::SearchEntry::Album(album)) => Some(album.tracks),
+                Some(catalog::SearchEntry::Artist(artist)) => Some(artist.tracks),
+                Some(catalog::SearchEntry::Playlist(playlist)) => self.playlist_tracks(playlist.id),
+                None => None,
             },
+        }
+    }
+
+    fn playlist_tracks(&self, id: i64) -> Option<Vec<Track>> {
+        self.db.as_ref().and_then(|db| db.playlist_tracks(id).ok())
+    }
+
+    fn open_playlist_detail(&mut self, playlist: Playlist) {
+        self.open_tracks = self
+            .db
+            .as_ref()
+            .and_then(|db| db.playlist_tracks(playlist.id).ok())
+            .unwrap_or_default();
+        self.open_playlist = Some(playlist);
+        self.selected = 0;
+    }
+
+    fn go_back(&mut self) {
+        self.confirm_delete = None;
+        if self.open_playlist.is_some() {
+            self.open_playlist = None;
+            self.open_tracks.clear();
+            self.selected = 0;
+        } else if self.pending_add.is_some() {
+            self.pending_add = None;
+            if let Some(view) = self.picker_return.take() {
+                self.view = view;
+            }
+            self.selected = 0;
         }
     }
 
@@ -378,6 +581,419 @@ impl App {
         self.queue = Queue::from_tracks(tracks);
         self.queue_selected = 0;
         self.start_playback();
+    }
+
+    /// Insert the selected library entry after the active track (FR-PLAY-04).
+    fn play_next(&mut self) {
+        let Some(tracks) = self.selected_tracks() else {
+            return;
+        };
+        if tracks.is_empty() {
+            self.status = "No playable tracks".to_string();
+            return;
+        }
+        if self.queue.is_empty() {
+            self.play_now(tracks);
+            return;
+        }
+        self.queue.insert_after_current(tracks);
+        self.status = "Play Next".to_string();
+    }
+
+    /// Append the selected library entry to the end of the queue (FR-PLAY-02).
+    fn add_to_queue(&mut self) {
+        let Some(tracks) = self.selected_tracks() else {
+            return;
+        };
+        if tracks.is_empty() {
+            self.status = "No playable tracks".to_string();
+            return;
+        }
+        self.queue.append(tracks);
+        self.status = "Added to queue".to_string();
+    }
+
+    /// Remove the selected queue entry (FR-PLAY-02).
+    fn remove_from_queue(&mut self) {
+        if self.focus != Focus::Queue {
+            self.status = "Remove works in the Queue view".to_string();
+            return;
+        }
+        if self.queue.is_empty() {
+            return;
+        }
+        let was_active = self.queue_selected == self.queue.current_index();
+        self.queue.remove(self.queue_selected);
+        self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
+        if was_active {
+            self.stop_playback("Track removed from queue");
+        } else {
+            self.status = "Removed from queue".to_string();
+        }
+    }
+
+    fn toggle_shuffle(&mut self) {
+        self.queue.set_shuffle(!self.queue.is_shuffled());
+        self.status = if self.queue.is_shuffled() {
+            "Shuffle: on".to_string()
+        } else {
+            "Shuffle: off".to_string()
+        };
+    }
+
+    fn cycle_repeat(&mut self) {
+        self.repeat = self.repeat.next();
+        self.status = format!("Repeat: {}", self.repeat.label());
+    }
+
+    fn toggle_play_mode(&mut self) {
+        self.play_mode = !self.play_mode;
+        self.status = if self.play_mode {
+            "Play mode".to_string()
+        } else {
+            "Library".to_string()
+        };
+    }
+
+    fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+    }
+
+    fn cycle_theme(&mut self) {
+        let next = match self.theme.name.as_str() {
+            "rust-walnut" => theme::catppuccin(),
+            "catppuccin" => theme::dracula(),
+            "dracula" => theme::nord(),
+            _ => theme::rust_walnut(),
+        };
+        self.status = format!("Theme: {}", next.name);
+        self.theme = next;
+    }
+
+    fn begin_prompt(&mut self, kind: PromptKind) {
+        self.prompt = Some(Prompt {
+            kind,
+            buffer: String::new(),
+        });
+        self.status = "Type and press Enter".to_string();
+    }
+
+    fn begin_rename(&mut self) {
+        if self.open_playlist.is_some() || self.view != LibraryView::Playlists {
+            self.status = "Rename works in the Playlists list".to_string();
+            return;
+        }
+        if let Some(playlist) = self.playlists.get(self.selected).cloned() {
+            self.begin_prompt(PromptKind::Rename(playlist.id));
+        }
+    }
+
+    fn begin_export(&mut self) {
+        if self.open_playlist.is_some() || self.view != LibraryView::Playlists {
+            self.status = "Export works in the Playlists list".to_string();
+            return;
+        }
+        if let Some(playlist) = self.playlists.get(self.selected).cloned() {
+            self.begin_prompt(PromptKind::Export(playlist.id));
+        }
+    }
+
+    fn duplicate_selected(&mut self) {
+        if self.open_playlist.is_some() || self.view != LibraryView::Playlists {
+            self.status = "Duplicate works in the Playlists list".to_string();
+            return;
+        }
+        let Some(playlist) = self.playlists.get(self.selected).cloned() else {
+            return;
+        };
+        let name = format!("{} (copy)", playlist.name);
+        match &mut self.db {
+            Some(db) => match db.duplicate_playlist(playlist.id, &name) {
+                Ok(_) => {
+                    self.reload_playlists();
+                    self.status = format!("Duplicated as {name}");
+                }
+                Err(error) => self.status = format!("Duplicate failed: {error}"),
+            },
+            None => self.status = "Database unavailable".to_string(),
+        }
+    }
+
+    fn delete_selected(&mut self) {
+        if self.open_playlist.is_some() {
+            self.remove_track_from_open_playlist();
+            return;
+        }
+        if self.view != LibraryView::Playlists {
+            self.status = "Delete works in the Playlists list".to_string();
+            return;
+        }
+        let Some(playlist) = self.playlists.get(self.selected).cloned() else {
+            return;
+        };
+        if self.confirm_delete == Some(playlist.id) {
+            self.confirm_delete = None;
+            match &mut self.db {
+                Some(db) => {
+                    if let Err(error) = db.delete_playlist(playlist.id) {
+                        self.status = format!("Delete failed: {error}");
+                        return;
+                    }
+                }
+                None => self.status = "Database unavailable".to_string(),
+            }
+            self.reload_playlists();
+            self.status = format!("Deleted playlist {}", playlist.name);
+        } else {
+            self.confirm_delete = Some(playlist.id);
+            self.status = format!("Delete '{}'? Press x again to confirm", playlist.name);
+        }
+    }
+
+    fn remove_track_from_open_playlist(&mut self) {
+        let Some(playlist) = self.open_playlist.clone() else {
+            return;
+        };
+        let Some(track) = self.open_tracks.get(self.selected).cloned() else {
+            return;
+        };
+        let Some(db) = &mut self.db else {
+            return;
+        };
+        if let Some(id) = db.track_id_by_path(&track.path).ok().flatten() {
+            if let Err(error) = db.remove_track_from_playlist(playlist.id, id) {
+                self.status = format!("Remove failed: {error}");
+                return;
+            }
+        }
+        self.reload_playlists();
+        self.status = "Removed from playlist".to_string();
+    }
+
+    fn begin_add_to_playlist(&mut self) {
+        if self.open_playlist.is_some() || self.view == LibraryView::Playlists {
+            self.status = "Select a song/album/artist to add".to_string();
+            return;
+        }
+        let Some(tracks) = self.selected_tracks() else {
+            return;
+        };
+        if tracks.is_empty() {
+            self.status = "No playable tracks".to_string();
+            return;
+        }
+        if self.playlists.is_empty() {
+            self.status = "No playlists; press c to create one".to_string();
+            return;
+        }
+        self.picker_return = Some(self.view);
+        self.pending_add = Some(tracks);
+        self.view = LibraryView::Playlists;
+        self.selected = 0;
+        self.status = "Pick a playlist to add to".to_string();
+    }
+
+    fn commit_add(&mut self, tracks: Vec<Track>) {
+        let Some(playlist) = self.playlists.get(self.selected).cloned() else {
+            return;
+        };
+        let Some(db) = &mut self.db else {
+            return;
+        };
+        let ids: Vec<i64> = tracks
+            .iter()
+            .filter_map(|track| db.track_id_by_path(&track.path).ok().flatten())
+            .collect();
+        if ids.is_empty() {
+            self.status = "No tracks added".to_string();
+        } else {
+            match db.add_tracks_to_playlist(playlist.id, &ids) {
+                Ok(()) => {
+                    self.status = format!("Added {} track(s) to {}", ids.len(), playlist.name)
+                }
+                Err(error) => self.status = format!("Add failed: {error}"),
+            }
+        }
+        self.pending_add = None;
+        if let Some(view) = self.picker_return.take() {
+            self.view = view;
+        }
+        self.selected = 0;
+    }
+
+    fn move_track(&mut self, delta: i32) {
+        if self.open_playlist.is_none() {
+            self.status = "Move works inside a playlist".to_string();
+            return;
+        }
+        let len = self.open_tracks.len();
+        if len < 2 {
+            return;
+        }
+        let from = self.selected;
+        let to = (from as i32 + delta).clamp(0, len as i32 - 1) as usize;
+        if from == to {
+            return;
+        }
+        self.open_tracks.swap(from, to);
+        self.selected = to;
+        self.persist_open_order();
+    }
+
+    fn sort_open_playlist(&mut self) {
+        if self.open_playlist.is_none() {
+            self.status = "Sort works inside a playlist".to_string();
+            return;
+        }
+        self.open_tracks.sort_by(|a, b| {
+            a.artist_label()
+                .to_lowercase()
+                .cmp(&b.artist_label().to_lowercase())
+                .then_with(|| {
+                    a.album_label()
+                        .to_lowercase()
+                        .cmp(&b.album_label().to_lowercase())
+                })
+                .then_with(|| library::compare_tracks(a, b))
+        });
+        self.selected = 0;
+        self.persist_open_order();
+        self.status = "Playlist sorted".to_string();
+    }
+
+    fn persist_open_order(&mut self) {
+        let Some(playlist) = self.open_playlist.clone() else {
+            return;
+        };
+        let Some(db) = &mut self.db else {
+            return;
+        };
+        let ids: Vec<i64> = self
+            .open_tracks
+            .iter()
+            .filter_map(|track| db.track_id_by_path(&track.path).ok().flatten())
+            .collect();
+        let _ = db.reorder_playlist(playlist.id, &ids);
+    }
+
+    fn commit_prompt(&mut self) {
+        let Some(prompt) = self.prompt.take() else {
+            return;
+        };
+        let value = prompt.buffer.trim().to_string();
+        match prompt.kind {
+            PromptKind::New => {
+                if value.is_empty() {
+                    self.status = "Empty name".to_string();
+                    return;
+                }
+                match &mut self.db {
+                    Some(db) => match db.create_playlist(&value) {
+                        Ok(_) => {
+                            self.reload_playlists();
+                            self.status = format!("Created playlist {value}");
+                        }
+                        Err(error) => self.status = format!("Create failed: {error}"),
+                    },
+                    None => self.status = "Database unavailable".to_string(),
+                }
+            }
+            PromptKind::Rename(id) => {
+                if value.is_empty() {
+                    self.status = "Empty name".to_string();
+                    return;
+                }
+                match &mut self.db {
+                    Some(db) => match db.rename_playlist(id, &value) {
+                        Ok(_) => {
+                            self.reload_playlists();
+                            self.status = format!("Renamed to {value}");
+                        }
+                        Err(error) => self.status = format!("Rename failed: {error}"),
+                    },
+                    None => self.status = "Database unavailable".to_string(),
+                }
+            }
+            PromptKind::Export(id) => {
+                if value.is_empty() {
+                    self.status = "Empty path".to_string();
+                    return;
+                }
+                self.export_playlist(id, &value);
+            }
+            PromptKind::Import => {
+                if value.is_empty() {
+                    self.status = "Empty path".to_string();
+                    return;
+                }
+                self.import_playlist(&value);
+            }
+        }
+    }
+
+    fn export_playlist(&mut self, id: i64, path: &str) {
+        let expanded = library::expand_tilde(path);
+        let tracks = match &self.db {
+            Some(db) => match db.playlist_tracks(id) {
+                Ok(tracks) => tracks,
+                Err(error) => {
+                    self.status = format!("Export failed: {error}");
+                    return;
+                }
+            },
+            None => {
+                self.status = "Database unavailable".to_string();
+                return;
+            }
+        };
+        match m3u::export_m3u_file(Path::new(&expanded), &tracks) {
+            Ok(()) => self.status = format!("Exported {} track(s) to {expanded}", tracks.len()),
+            Err(error) => self.status = format!("Export failed: {error}"),
+        }
+    }
+
+    fn import_playlist(&mut self, path: &str) {
+        let expanded = library::expand_tilde(path);
+        let outcome = match m3u::import_m3u_file(Path::new(&expanded)) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.status = format!("Import failed: {error}");
+                return;
+            }
+        };
+
+        let name = Path::new(&expanded)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Imported".to_string());
+
+        let Some(db) = &mut self.db else {
+            self.status = "Database unavailable".to_string();
+            return;
+        };
+        let mut ids = Vec::new();
+        for path in &outcome.imported {
+            let track = library::read_track(path);
+            if let Ok(id) = db.upsert_track(&track) {
+                ids.push(id);
+            }
+        }
+        let playlist_id = match db.create_playlist(&name) {
+            Ok(id) => id,
+            Err(error) => {
+                self.status = format!("Import failed: {error}");
+                return;
+            }
+        };
+        let _ = db.add_tracks_to_playlist(playlist_id, &ids);
+
+        self.reload_catalog();
+        self.status = format!(
+            "Imported {} (skipped {}, missing {})",
+            outcome.imported.len(),
+            outcome.skipped.len(),
+            outcome.unavailable.len()
+        );
     }
 
     /// Play the current queue item, skipping any that fail to play (FR-06).
@@ -431,12 +1047,26 @@ impl App {
         self.status = message.to_string();
     }
 
-    fn advance_or_stop(&mut self) {
+    /// Advance to the next track, honouring Repeat All but not Repeat One.
+    fn advance_to_next(&mut self) {
         if self.queue.advance() {
             self.queue_selected = self.queue.current_index();
             self.start_playback();
+        } else if self.repeat == RepeatMode::All {
+            self.queue.set_current(0);
+            self.queue_selected = 0;
+            self.start_playback();
         } else {
             self.stop_playback("End of queue");
+        }
+    }
+
+    /// Handle the natural end of the current track (FR-PLAY-06, FR-PLAY-07).
+    fn on_finished(&mut self) {
+        if self.repeat == RepeatMode::One {
+            self.start_playback();
+        } else {
+            self.advance_to_next();
         }
     }
 
@@ -445,7 +1075,7 @@ impl App {
             self.status = "Queue is empty".to_string();
             return;
         }
-        self.advance_or_stop();
+        self.advance_to_next();
     }
 
     /// Previous/restart behaviour (FR-07).
@@ -510,6 +1140,15 @@ impl App {
             player.set_volume_percent(self.volume);
         }
         self.status = format!("Volume: {}%", self.volume);
+    }
+}
+
+fn prompt_label(kind: &PromptKind) -> &'static str {
+    match kind {
+        PromptKind::New => "New playlist name",
+        PromptKind::Rename(_) => "New name",
+        PromptKind::Export(_) => "Export M3U path",
+        PromptKind::Import => "Import M3U path",
     }
 }
 

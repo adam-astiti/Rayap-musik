@@ -273,6 +273,84 @@ impl Db {
         }
         Ok(tracks)
     }
+
+    /// Track ids of a playlist in their stored order.
+    pub fn playlist_track_ids(&self, playlist_id: i64) -> Result<Vec<i64>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
+        )?;
+        let rows = stmt.query_map(params![playlist_id], |row| row.get::<_, i64>(0))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
+    }
+
+    /// Append several tracks to the end of a playlist.
+    pub fn add_tracks_to_playlist(
+        &self,
+        playlist_id: i64,
+        track_ids: &[i64],
+    ) -> Result<(), DbError> {
+        let mut position: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?1",
+            params![playlist_id],
+            |row| row.get(0),
+        )?;
+        for &track_id in track_ids {
+            self.conn.execute(
+                "INSERT INTO playlist_tracks (playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
+                params![playlist_id, position, track_id],
+            )?;
+            position += 1;
+        }
+        Ok(())
+    }
+
+    /// Replace the contents of a playlist with `track_ids` in the given order.
+    pub fn reorder_playlist(&mut self, playlist_id: i64, track_ids: &[i64]) -> Result<(), DbError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+            params![playlist_id],
+        )?;
+        for (position, &track_id) in track_ids.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO playlist_tracks (playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
+                params![playlist_id, position as i64, track_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Duplicate a playlist with a new name. Returns the new playlist id.
+    pub fn duplicate_playlist(&mut self, id: i64, new_name: &str) -> Result<i64, DbError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO playlists (name) VALUES (?1)",
+            params![new_name],
+        )?;
+        let new_id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO playlist_tracks (playlist_id, position, track_id)
+             SELECT ?1, position, track_id FROM playlist_tracks WHERE playlist_id = ?2",
+            params![new_id, id],
+        )?;
+        tx.commit()?;
+        Ok(new_id)
+    }
+
+    /// Drop references to unavailable tracks from every playlist (FR-PL-06).
+    pub fn remove_unavailable_from_playlists(&self) -> Result<(), DbError> {
+        self.conn.execute(
+            "DELETE FROM playlist_tracks
+             WHERE track_id IN (SELECT id FROM tracks WHERE available = 0)",
+            [],
+        )?;
+        Ok(())
+    }
 }
 
 fn duration_ms(duration: Duration) -> i64 {

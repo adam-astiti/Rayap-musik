@@ -61,7 +61,24 @@ KEYS:
     Tab             Switch focus between Library and Queue
     1 / 2 / 3 / 4   Switch view: Songs / Albums / Artists / Playlists
     /               Global search (type to filter, Esc to leave)
-    Enter           Play Now: selected track, album, artist, or playlist
+    Enter           Play Now / open playlist (Playlists view)
+    a               Add selection to the end of the queue
+    N               Play Next: insert selection after the active track
+    d               Remove the selected queue entry (Queue view)
+    s               Toggle shuffle
+    R               Cycle repeat: Off -> All -> One -> Off
+    m               Toggle Play Mode (full screen)
+    T               Cycle theme (rust-walnut/catppuccin/dracula/nord)
+    ?               Toggle this help
+    c               Create a new playlist
+    e               Rename the selected playlist
+    D               Duplicate the selected playlist
+    x               Delete playlist / remove track (press x twice to confirm)
+    P               Add the selection to a playlist
+    I / E           Import / export an M3U playlist
+    J / K           Move track down/up inside a playlist
+    S               Sort the open playlist by artist/album/track
+    Esc / Backspace Back (leave a playlist, cancel a picker)
     Space           Play / Pause
     n               Next track
     p               Previous / restart (restart if played > 3s)
@@ -193,10 +210,11 @@ fn start() -> Result<(), i32> {
         }
     };
 
-    let mut app = App::new(root, config.volume(), db);
+    let mut app = App::new(root, config.volume(), &config.theme, db);
     let result = run(&mut guard.terminal, &mut app);
 
     config.volume = app.volume;
+    config.theme = app.theme.name.clone();
     if let Err(error) = config.save() {
         eprintln!("rayap-musik: warning: could not save configuration: {error}");
     }
@@ -218,7 +236,7 @@ fn run(terminal: &mut Terminal<Backend>, app: &mut App) -> io::Result<()> {
         if event::poll(EVENT_POLL_INTERVAL)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if let Some(action) = input::map_key(key, app.is_searching()) {
+                    if let Some(action) = input::map_key(key, app.text_input_active()) {
                         app.handle_action(action);
                     }
                 }

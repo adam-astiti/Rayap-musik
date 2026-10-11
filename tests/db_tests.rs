@@ -189,3 +189,71 @@ fn sync_tracks_updates_metadata_in_place() {
     assert_eq!(tracks[0].title, "New");
     assert_eq!(tracks[0].track_number, Some(3));
 }
+
+#[test]
+fn reorder_playlist_persists_new_order() {
+    let mut db = Db::open_in_memory().expect("open in-memory db");
+    let a = db
+        .upsert_track(&track("/music/a.mp3", "A", Some(1)))
+        .unwrap();
+    let b = db
+        .upsert_track(&track("/music/b.mp3", "B", Some(2)))
+        .unwrap();
+    let c = db
+        .upsert_track(&track("/music/c.mp3", "C", Some(3)))
+        .unwrap();
+    let playlist = db.create_playlist("P").unwrap();
+    db.add_tracks_to_playlist(playlist, &[a, b, c]).unwrap();
+
+    db.reorder_playlist(playlist, &[c, a, b]).unwrap();
+
+    let titles: Vec<String> = db
+        .playlist_tracks(playlist)
+        .unwrap()
+        .iter()
+        .map(|track| track.title.clone())
+        .collect();
+    assert_eq!(titles, vec!["C", "A", "B"]);
+}
+
+#[test]
+fn duplicate_playlist_is_independent() {
+    let mut db = Db::open_in_memory().expect("open in-memory db");
+    let a = db
+        .upsert_track(&track("/music/a.mp3", "A", Some(1)))
+        .unwrap();
+    let playlist = db.create_playlist("Original").unwrap();
+    db.add_tracks_to_playlist(playlist, &[a]).unwrap();
+
+    let dup = db.duplicate_playlist(playlist, "Original (copy)").unwrap();
+    assert_eq!(db.list_playlists().unwrap().len(), 2);
+    assert_eq!(db.playlist_tracks(dup).unwrap().len(), 1);
+
+    db.remove_track_from_playlist(dup, a).unwrap();
+    assert_eq!(db.playlist_tracks(dup).unwrap().len(), 0);
+    assert_eq!(
+        db.playlist_tracks(playlist).unwrap().len(),
+        1,
+        "original untouched"
+    );
+}
+
+#[test]
+fn unavailable_tracks_are_removed_from_playlists() {
+    let db = Db::open_in_memory().expect("open in-memory db");
+    let a = db
+        .upsert_track(&track("/music/a.mp3", "A", Some(1)))
+        .unwrap();
+    let b = db
+        .upsert_track(&track("/music/b.mp3", "B", Some(2)))
+        .unwrap();
+    let playlist = db.create_playlist("P").unwrap();
+    db.add_tracks_to_playlist(playlist, &[a, b]).unwrap();
+
+    db.mark_unavailable(b).unwrap();
+    db.remove_unavailable_from_playlists().unwrap();
+
+    let tracks = db.playlist_tracks(playlist).unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0].title, "A");
+}
