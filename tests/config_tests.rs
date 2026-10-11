@@ -85,3 +85,47 @@ fn written_file_is_human_readable() {
     assert!(text.contains("do not change"));
     assert!(text.contains("[advanced]"));
 }
+
+#[test]
+fn load_tolerates_malformed_fields() {
+    let temp = TempDir::new();
+    let path = temp.path.join("config.toml");
+    fs::write(&path, "root = \"/music\"\nvolume = \"loud\"\ntheme = 123\n").expect("write config");
+
+    let config = Config::load_from_path(&path);
+    assert_eq!(config.root.as_deref(), Some("/music"));
+    assert_eq!(config.volume, rayap_musik::config::DEFAULT_VOLUME);
+    assert_eq!(config.theme, rayap_musik::config::DEFAULT_THEME);
+}
+
+#[test]
+fn save_preserves_user_comments_and_unknown_keys() {
+    let temp = TempDir::new();
+    let path = temp.path.join("config.toml");
+
+    let original = r#"# keep this note
+root = "/old"
+volume = 70
+
+[advanced]
+data_dir = "/old/data"
+
+[my_custom]
+foo = "bar"
+"#;
+    fs::write(&path, original).expect("write config");
+
+    let mut config = Config::load_from_path(&path);
+    assert_eq!(config.root.as_deref(), Some("/old"));
+
+    config.root = Some("/new".to_string());
+    config.volume = 85;
+    config.save_to_path(&path).expect("save config");
+
+    let text = fs::read_to_string(&path).expect("read config");
+    assert!(text.contains("# keep this note"), "user comment preserved");
+    assert!(text.contains("[my_custom]"), "unknown section preserved");
+    assert!(text.contains("foo = \"bar\""), "unknown key preserved");
+    assert!(text.contains("root = \"/new\""));
+    assert!(text.contains("volume = 85"));
+}

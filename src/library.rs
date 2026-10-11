@@ -258,6 +258,16 @@ pub fn build_queue(selected: &Path) -> Vec<Track> {
     tracks
 }
 
+/// Recursively scan `root`, returning all supported audio tracks with metadata.
+///
+/// Order is deterministic (directories before files, depth-first). This is the
+/// source for the persistent library index.
+pub fn scan_tracks(root: &Path) -> Vec<Track> {
+    let mut tracks = Vec::new();
+    collect_tracks(root, &mut tracks);
+    tracks
+}
+
 /// Recursively collect tracks under `dir` in traversal order: subdirectories
 /// before files, names sorted case-insensitively, tracks sorted by number then
 /// file name (via [`list_directory`]).

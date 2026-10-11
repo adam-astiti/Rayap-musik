@@ -66,6 +66,7 @@ KEYS:
     p               Previous / restart (restart if played > 3s)
     + / =           Volume up (5% step)
     -               Volume down (5% step)
+    r               Rescan library (rebuild index)
     q               Quit and stop playback
 
 EXIT CODES:
@@ -175,7 +176,7 @@ fn start() -> Result<(), i32> {
     }
 
     let db_path = Path::new(&config.advanced.data_dir).join(config::DB_FILE);
-    let _db = match Db::open(&db_path) {
+    let db = match Db::open(&db_path) {
         Ok(db) => Some(db),
         Err(error) => {
             eprintln!("rayap-musik: warning: database unavailable: {error}");
@@ -191,7 +192,7 @@ fn start() -> Result<(), i32> {
         }
     };
 
-    let mut app = App::new(root, config.volume());
+    let mut app = App::new(root, config.volume(), db);
     let result = run(&mut guard.terminal, &mut app);
 
     config.volume = app.volume;

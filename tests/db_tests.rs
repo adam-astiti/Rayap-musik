@@ -1,7 +1,7 @@
 //! Integration tests for SQLite persistence and migrations.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -139,4 +139,53 @@ fn deleting_playlist_leaves_tracks_intact() {
         1,
         "audio file identity survives"
     );
+}
+
+#[test]
+fn sync_tracks_marks_missing_as_unavailable() {
+    let mut db = Db::open_in_memory().expect("open in-memory db");
+    db.upsert_track(&track("/music/a.mp3", "A", Some(1)))
+        .unwrap();
+    db.upsert_track(&track("/music/b.mp3", "B", Some(2)))
+        .unwrap();
+
+    db.sync_tracks(&[track("/music/a.mp3", "A", Some(1))])
+        .expect("sync");
+
+    assert_eq!(db.available(Path::new("/music/a.mp3")).unwrap(), Some(true));
+    assert_eq!(
+        db.available(Path::new("/music/b.mp3")).unwrap(),
+        Some(false)
+    );
+}
+
+#[test]
+fn sync_tracks_restores_unavailable_on_reappear() {
+    let mut db = Db::open_in_memory().expect("open in-memory db");
+    db.upsert_track(&track("/music/a.mp3", "A", Some(1)))
+        .unwrap();
+
+    db.sync_tracks(&[]).expect("sync empty");
+    assert_eq!(
+        db.available(Path::new("/music/a.mp3")).unwrap(),
+        Some(false)
+    );
+
+    db.sync_tracks(&[track("/music/a.mp3", "A", Some(1))])
+        .expect("sync present");
+    assert_eq!(db.available(Path::new("/music/a.mp3")).unwrap(), Some(true));
+}
+
+#[test]
+fn sync_tracks_updates_metadata_in_place() {
+    let mut db = Db::open_in_memory().expect("open in-memory db");
+    db.sync_tracks(&[track("/music/a.mp3", "Old", Some(1))])
+        .expect("first sync");
+    db.sync_tracks(&[track("/music/a.mp3", "New", Some(3))])
+        .expect("second sync");
+
+    let tracks = db.all_tracks().unwrap();
+    assert_eq!(tracks.len(), 1, "path identity keeps a single row");
+    assert_eq!(tracks[0].title, "New");
+    assert_eq!(tracks[0].track_number, Some(3));
 }

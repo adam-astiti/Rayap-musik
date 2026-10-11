@@ -230,6 +230,7 @@ pub enum Action {
     PreviousTrack,
     VolumeUp,
     VolumeDown,
+    Rescan,
     Quit,
     Resize,
 }

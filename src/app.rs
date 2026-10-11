@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::db::Db;
+use crate::indexer::{IndexEvent, Indexer};
 use crate::library;
 use crate::models::{
     previous_action, Action, Focus, LibraryItem, PlaybackState, PreviousAction, Queue, Track,
@@ -41,10 +43,12 @@ pub struct App {
     pub should_quit: bool,
     pub status: String,
     player: Option<Player>,
+    db: Option<Db>,
+    indexer: Option<Indexer>,
 }
 
 impl App {
-    pub fn new(root: PathBuf, volume: u8) -> Self {
+    pub fn new(root: PathBuf, volume: u8, db: Option<Db>) -> Self {
         let volume = volume.min(100);
         let (player, player_error) = match Player::new() {
             Ok(player) => {
@@ -52,6 +56,12 @@ impl App {
                 (Some(player), None)
             }
             Err(error) => (None, Some(error.to_string())),
+        };
+
+        let indexer = if db.is_some() {
+            Some(Indexer::new(root.clone()))
+        } else {
+            None
         };
 
         let mut app = Self {
@@ -67,6 +77,8 @@ impl App {
             should_quit: false,
             status: String::new(),
             player,
+            db,
+            indexer,
         };
         app.reload_directory();
         if let Some(error) = player_error {
@@ -139,13 +151,16 @@ impl App {
             Action::PreviousTrack => self.previous(),
             Action::VolumeUp => self.set_volume(change_volume(self.volume, VOLUME_STEP as i8)),
             Action::VolumeDown => self.set_volume(change_volume(self.volume, -(VOLUME_STEP as i8))),
+            Action::Rescan => self.rescan_library(),
             Action::Quit => self.should_quit = true,
             Action::Resize => {}
         }
     }
 
-    /// Poll the player for state changes. Called once per UI frame.
+    /// Poll the player for state changes and drain indexer events. Called once
+    /// per UI frame.
     pub fn tick(&mut self) {
+        self.drain_indexer();
         if self.queue.is_empty() {
             return;
         }
@@ -180,6 +195,45 @@ impl App {
         match self.focus {
             Focus::Library => self.selected = next,
             Focus::Queue => self.queue_selected = next,
+        }
+    }
+
+    fn rescan_library(&mut self) {
+        match &self.indexer {
+            Some(indexer) => {
+                indexer.rescan();
+                self.status = "Rescanning library...".to_string();
+            }
+            None => self.status = "Library index unavailable".to_string(),
+        }
+    }
+
+    /// Consume indexer events and apply them to the database and status line.
+    fn drain_indexer(&mut self) {
+        let mut events = Vec::new();
+        if let Some(indexer) = &self.indexer {
+            while let Some(event) = indexer.poll() {
+                events.push(event);
+            }
+        }
+
+        for event in events {
+            match event {
+                IndexEvent::ScanStarted => self.status = "Indexing library...".to_string(),
+                IndexEvent::ScanCompleted { tracks } => {
+                    let count = tracks.len();
+                    match &mut self.db {
+                        Some(db) => match db.sync_tracks(&tracks) {
+                            Ok(()) => self.status = format!("Indexed {count} track(s)"),
+                            Err(error) => self.status = format!("Index write failed: {error}"),
+                        },
+                        None => self.status = format!("Indexed {count} track(s) (not persisted)"),
+                    }
+                }
+                IndexEvent::WatcherError { error } => {
+                    self.status = format!("Filesystem watcher unavailable: {error}");
+                }
+            }
         }
     }
 

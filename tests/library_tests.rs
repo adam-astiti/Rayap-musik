@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rayap_musik::library::{
     expand_tilde, is_supported_audio, list_directory, parse_track_number, scan_recursive,
-    sort_items, validate_root, LibraryError,
+    scan_tracks, sort_items, validate_root, LibraryError,
 };
 use rayap_musik::models::{LibraryItem, Track};
 
@@ -249,6 +249,20 @@ fn scan_recursive_skips_symlinked_directories() {
         .collect();
 
     assert_eq!(relative, vec!["real.mp3"]);
+}
+
+#[test]
+fn scan_tracks_collects_metadata_and_order() {
+    let temp = TempDir::new();
+    temp.file("A/01.mp3");
+    temp.file("A/02.mp3");
+    temp.file("root.mp3");
+
+    let tracks = scan_tracks(temp.path());
+    let names: Vec<String> = tracks.iter().map(Track::file_name).collect();
+
+    assert_eq!(names, vec!["01.mp3", "02.mp3", "root.mp3"]);
+    assert_eq!(tracks[0].title, "01", "fallback title is the file stem");
 }
 
 #[test]

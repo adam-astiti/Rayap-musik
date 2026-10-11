@@ -24,6 +24,7 @@ pub fn map_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('p') => Action::PreviousTrack,
         KeyCode::Char('+') | KeyCode::Char('=') => Action::VolumeUp,
         KeyCode::Char('-') => Action::VolumeDown,
+        KeyCode::Char('r') => Action::Rescan,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('c')
             if key

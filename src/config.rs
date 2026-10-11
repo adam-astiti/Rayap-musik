@@ -1,9 +1,13 @@
 //! Persistent preferences stored in a human-editable TOML file.
+//!
+//! The file is deliberately forgiving: unknown keys are kept, comments are
+//! preserved, and a single malformed value falls back to its default instead
+//! of discarding the whole file.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use toml_edit::{value, DocumentMut, Item, Table};
 
 /// Directory name used under the XDG base directories.
 pub const APP_DIR: &str = "rayap-musik";
@@ -39,17 +43,16 @@ fn home_dir() -> PathBuf {
         .unwrap_or_default()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Music root directory. `None` until the user has chosen one.
     pub root: Option<String>,
     pub theme: String,
     pub volume: u8,
-    #[serde(default)]
     pub advanced: Advanced,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Advanced {
     /// Directory that holds the SQLite database.
     pub data_dir: String,
@@ -76,19 +79,24 @@ impl Default for Config {
 
 impl Config {
     /// Load the configuration, falling back to defaults when the file is
-    /// missing or unreadable. Never fails: a corrupt config is treated as empty.
+    /// missing, unreadable, or malformed.
     pub fn load() -> Config {
         Self::load_from_path(&config_dir().join(CONFIG_FILE))
     }
 
     pub fn load_from_path(path: &Path) -> Config {
-        match fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text).unwrap_or_default(),
-            Err(_) => Config::default(),
-        }
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(_) => return Config::default(),
+        };
+        parse(&text)
     }
 
     /// Write the configuration, creating parent directories as needed.
+    ///
+    /// An existing, well-formed file is edited in place so comments and
+    /// unknown keys are preserved. A missing or malformed file is replaced by
+    /// the commented template.
     pub fn save(&self) -> std::io::Result<()> {
         self.save_to_path(&config_dir().join(CONFIG_FILE))
     }
@@ -97,7 +105,13 @@ impl Config {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, self.render())
+
+        let text = match fs::read_to_string(path) {
+            Ok(existing) => update_in_place(&existing, self).unwrap_or_else(|| self.render()),
+            Err(_) => self.render(),
+        };
+
+        fs::write(path, text)
     }
 
     /// Volume clamped to the 0..=100 range, tolerating hand-edited values.
@@ -106,6 +120,8 @@ impl Config {
     }
 
     /// Render the configuration as commented TOML so it stays easy to edit.
+    ///
+    /// Used only for first-time creation (or recovery of a corrupt file).
     fn render(&self) -> String {
         let root_line = match &self.root {
             Some(root) => format!("root = \"{}\"", escape(root)),
@@ -157,6 +173,61 @@ data_dir = "{data_dir}"
     }
 }
 
+/// Parse a config file, applying per-field defaults for anything missing or
+/// malformed. Never fails.
+fn parse(text: &str) -> Config {
+    let Ok(doc) = text.parse::<DocumentMut>() else {
+        return Config::default();
+    };
+
+    let mut config = Config::default();
+
+    if let Some(root) = doc.get("root").and_then(Item::as_str) {
+        config.root = Some(root.to_string());
+    }
+    if let Some(theme) = doc.get("theme").and_then(Item::as_str) {
+        if !theme.is_empty() {
+            config.theme = theme.to_string();
+        }
+    }
+    if let Some(volume) = doc.get("volume").and_then(Item::as_integer) {
+        config.volume = volume.clamp(0, 100) as u8;
+    }
+    if let Some(data_dir) = doc
+        .get("advanced")
+        .and_then(Item::as_table)
+        .and_then(|table| table.get("data_dir"))
+        .and_then(Item::as_str)
+    {
+        if !data_dir.is_empty() {
+            config.advanced.data_dir = data_dir.to_string();
+        }
+    }
+
+    config
+}
+
+/// Update the known keys of an existing config file in place, preserving
+/// comments and unknown keys. Returns `None` when the file cannot be parsed.
+fn update_in_place(existing: &str, config: &Config) -> Option<String> {
+    let mut doc: DocumentMut = existing.parse().ok()?;
+
+    if let Some(root) = &config.root {
+        doc["root"] = value(root.clone());
+    }
+    doc["theme"] = value(config.theme.clone());
+    doc["volume"] = value(i64::from(config.volume));
+
+    if doc.get("advanced").and_then(Item::as_table).is_none() {
+        doc["advanced"] = Item::Table(Table::new());
+    }
+    if let Some(table) = doc["advanced"].as_table_mut() {
+        table["data_dir"] = value(config.advanced.data_dir.clone());
+    }
+
+    Some(doc.to_string())
+}
+
 /// Escape a value for use inside a TOML basic string.
 fn escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
@@ -164,7 +235,7 @@ fn escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape, Config, DEFAULT_THEME, DEFAULT_VOLUME};
+    use super::{escape, parse, update_in_place, Config, DEFAULT_THEME, DEFAULT_VOLUME};
 
     #[test]
     fn escape_handles_backslashes_and_quotes() {
@@ -205,5 +276,58 @@ mod tests {
         assert_eq!(config.theme, DEFAULT_THEME);
         assert_eq!(config.volume, DEFAULT_VOLUME);
         assert!(config.root.is_none());
+    }
+
+    #[test]
+    fn parse_applies_per_field_defaults() {
+        let text = r#"
+root = "/music"
+volume = "loud"
+theme = 123
+"#;
+        let config = parse(text);
+        assert_eq!(config.root.as_deref(), Some("/music"));
+        assert_eq!(config.theme, DEFAULT_THEME, "malformed theme falls back");
+        assert_eq!(config.volume, DEFAULT_VOLUME, "malformed volume falls back");
+    }
+
+    #[test]
+    fn parse_clamps_out_of_range_volume() {
+        let config = parse("volume = 999");
+        assert_eq!(config.volume, 100);
+        let config = parse("volume = -5");
+        assert_eq!(config.volume, 0);
+    }
+
+    #[test]
+    fn update_preserves_comments_and_unknown_keys() {
+        let existing = r#"# my personal note
+root = "/old"
+volume = 70
+
+[advanced]
+data_dir = "/old/data"
+
+[my_custom]
+foo = "bar"
+"#;
+        let config = Config {
+            root: Some("/new".to_string()),
+            theme: "catppuccin".to_string(),
+            volume: 80,
+            advanced: super::Advanced {
+                data_dir: "/new/data".to_string(),
+            },
+        };
+
+        let updated = update_in_place(existing, &config).expect("update");
+
+        assert!(updated.contains("# my personal note"));
+        assert!(updated.contains("root = \"/new\""));
+        assert!(updated.contains("theme = \"catppuccin\""));
+        assert!(updated.contains("volume = 80"));
+        assert!(updated.contains("data_dir = \"/new/data\""));
+        assert!(updated.contains("[my_custom]"));
+        assert!(updated.contains("foo = \"bar\""));
     }
 }

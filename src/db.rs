@@ -114,26 +114,33 @@ impl Db {
     ///
     /// Returns the row id.
     pub fn upsert_track(&self, track: &Track) -> Result<i64, DbError> {
-        self.conn.execute(
-            "INSERT INTO tracks (path, title, artist, album, track_number, duration_ms, available)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
-             ON CONFLICT(path) DO UPDATE SET
-               title        = excluded.title,
-               artist       = excluded.artist,
-               album        = excluded.album,
-               track_number = excluded.track_number,
-               duration_ms  = excluded.duration_ms,
-               available    = 1",
-            params![
-                track.path.to_string_lossy().into_owned(),
-                track.title,
-                track.artist,
-                track.album,
-                track.track_number.map(i64::from),
-                track.duration.map(duration_ms),
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid())
+        upsert_track_in(&self.conn, track).map_err(DbError::from)
+    }
+
+    /// Reconcile the index with a full scan: mark every known track unavailable,
+    /// then (re)insert the tracks that are currently present. Runs in a single
+    /// transaction. The file path remains the identity of a track.
+    pub fn sync_tracks(&mut self, tracks: &[Track]) -> Result<(), DbError> {
+        let tx = self.conn.transaction()?;
+        tx.execute("UPDATE tracks SET available = 0", [])?;
+        for track in tracks {
+            upsert_track_in(&tx, track)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Availability of a track by path: `None` when it is not indexed at all.
+    pub fn available(&self, path: &Path) -> Result<Option<bool>, DbError> {
+        self.conn
+            .query_row(
+                "SELECT available FROM tracks WHERE path = ?1",
+                params![path.to_string_lossy().into_owned()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|value| value.map(|v| v != 0))
+            .map_err(DbError::from)
     }
 
     /// Mark a track as unavailable (missing on disk) without deleting it.
@@ -256,6 +263,29 @@ impl Db {
 
 fn duration_ms(duration: Duration) -> i64 {
     duration.as_millis().min(i64::MAX as u128) as i64
+}
+
+fn upsert_track_in(conn: &Connection, track: &Track) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO tracks (path, title, artist, album, track_number, duration_ms, available)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+         ON CONFLICT(path) DO UPDATE SET
+           title        = excluded.title,
+           artist       = excluded.artist,
+           album        = excluded.album,
+           track_number = excluded.track_number,
+           duration_ms  = excluded.duration_ms,
+           available    = 1",
+        params![
+            track.path.to_string_lossy().into_owned(),
+            track.title,
+            track.artist,
+            track.album,
+            track.track_number.map(i64::from),
+            track.duration.map(duration_ms),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
 }
 
 fn track_from_row(row: &Row<'_>) -> rusqlite::Result<Track> {
