@@ -14,9 +14,6 @@ pub fn map_key(key: KeyEvent, text_mode: bool) -> Option<Action> {
         return None;
     }
 
-    if key.code == KeyCode::Char('q') {
-        return Some(Action::Quit);
-    }
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(Action::Quit);
     }
@@ -44,6 +41,7 @@ pub fn map_key(key: KeyEvent, text_mode: bool) -> Option<Action> {
         KeyCode::Char('p') => Action::PreviousTrack,
         KeyCode::Char('+') | KeyCode::Char('=') => Action::VolumeUp,
         KeyCode::Char('-') => Action::VolumeDown,
+        KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('r') => Action::Rescan,
         KeyCode::Char('/') => Action::StartSearch,
         KeyCode::Char('1') => Action::SwitchView(LibraryView::Songs),
@@ -72,4 +70,32 @@ pub fn map_key(key: KeyEvent, text_mode: bool) -> Option<Action> {
     };
 
     Some(action)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_key;
+    use crate::models::{Action, LibraryView};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn q_quits_in_normal_mode() {
+        let event = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(map_key(event, false), Some(Action::Quit));
+    }
+
+    #[test]
+    fn q_types_in_text_mode() {
+        let event = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(map_key(event, true), Some(Action::TypeChar('q')));
+    }
+
+    #[test]
+    fn view_shortcuts_map_to_views() {
+        let event = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE);
+        assert_eq!(
+            map_key(event, false),
+            Some(Action::SwitchView(LibraryView::Albums))
+        );
+    }
 }

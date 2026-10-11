@@ -1,23 +1,27 @@
 # Rayap Musik
 
-Local-first terminal music player for Linux, written in Rust. It browses a
-local music directory, reads audio metadata, plays supported files, and manages
-an in-memory playback queue — all from the keyboard, without a server or
-network access.
+Local-first, keyboard-driven **terminal music player and library manager** for
+Linux, written in Rust. It indexes a local music directory into an embedded
+database, groups the collection into Songs / Albums / Artists, provides global
+search, manages playlists (with M3U import/export), and plays audio — all
+offline and without a server.
 
-> Status: **Milestone 5 — integration and hardening.** All MVP features are
-> implemented. See `docs/PRD.md` for the full product requirements.
+> Status: **Milestone 7 — release review.** See `upgrade/prd_upgrade.md` for the
+> v0.2 requirements and `docs/QA.md` for the v0.1 baseline.
 
 ## Features
 
-- Manual folder browsing with metadata preview (title, artist, album, duration).
-- Deterministic sorting: folders first, then tracks by track number, then name.
-- Playback with play/pause, next, previous/restart, and volume control.
-- Recursive queue built from the selected track's folder subtree.
-- Auto-next, stop at end of queue, and automatic skipping of files that fail.
-- Real-time progress, position, and total duration when available.
-- Safe behavior for empty, unreadable, or corrupt inputs.
-- Terminal is always restored on exit.
+- Persistent library root and preferences (a commented TOML config file).
+- Embedded SQLite index; automatic filesystem watcher plus manual rescan.
+- Songs, Albums, Artists, and Playlists views with deterministic sorting.
+- Global, case-insensitive search across songs, albums, artists, and playlists.
+- Play Now, Play Next, Add to Queue, and queue removal.
+- Shuffle (active track preserved) and three repeat modes (Off / All / One).
+- Playlists: create, rename, delete, duplicate, reorder, sort, add; M3U
+  import/export with a summary of imported/skipped/missing paths.
+- Four themes (Rust & Walnut default, Catppuccin, Dracula, Nord), Play Mode,
+  an ASCII mascot, and an in-app help screen.
+- Read-only access to audio files; symlinks are ignored.
 
 ## Requirements
 
@@ -29,7 +33,7 @@ network access.
 ## Build
 
 ```sh
-cargo build --release
+cargo build --release --locked
 ```
 
 The binary is produced at `target/release/rayap-musik`.
@@ -38,22 +42,10 @@ The binary is produced at `target/release/rayap-musik`.
 
 ### Option A — Debian package (.deb)
 
-Build the package, then install it with `apt` (this also resolves the ALSA
-runtime dependency):
-
 ```sh
 packaging/build-deb.sh
 sudo apt install ./dist/rayap-musik_*.deb
 ```
-
-- Installs the binary to `/usr/bin/rayap-musik`.
-- Installs documentation to `/usr/share/doc/rayap-musik/`.
-- Runtime dependencies: `libasound2t64` (Debian 13+) or `libasound2`, plus
-  `libc6`.
-- Remove with `sudo apt remove rayap-musik`.
-
-To upgrade after changing the code, rebuild and run the same `apt install`
-command again.
 
 ### Option B — Install with cargo (no root required)
 
@@ -61,35 +53,29 @@ command again.
 cargo install --path . --root "$HOME/.local" --locked
 ```
 
-This places the binary in `~/.local/bin/rayap-musik`. Make sure `~/.local/bin`
-is on your `PATH` (add `export PATH="$HOME/.local/bin:$PATH"` to your shell
-profile if needed).
-
-To reinstall after changing the code:
-
-```sh
-cargo install --path . --root "$HOME/.local" --locked --force
-```
-
-> Always pass `--locked`: `Cargo.lock` pins dependency versions that are
-> compatible with Rust 1.85. Without it, `cargo install` may resolve newer
-> crates that require a newer compiler.
+> Always pass `--locked`: `Cargo.lock` pins versions compatible with Rust 1.85.
 
 ## Usage
 
 ```sh
-rayap-musik <music-directory>
+rayap-musik                  # uses the root stored in the config file
+rayap-musik ~/Music          # sets the root and saves it for next time
 rayap-musik --help
 rayap-musik --version
-
-# or during development
-cargo run -- ~/Music
 ```
 
-- The root directory argument is required and validated before the UI starts.
 - A leading `~` or `~/` is expanded using `$HOME`.
-- Run `rayap-musik --help` for the full usage text (arguments, options,
-  supported formats, key bindings, and exit codes).
+- The music directory is remembered in the config file, so you usually only
+  pass it once.
+
+### Configuration
+
+Settings live in a commented TOML file at
+`$XDG_CONFIG_HOME/rayap-musik/config.toml` (default `~/.config/rayap-musik/`).
+The database lives in `$XDG_DATA_HOME/rayap-musik/library.db` (default
+`~/.local/share/rayap-musik/`). The config file is human-editable and preserves
+your comments and unknown keys; a malformed value falls back to its default
+without discarding the rest.
 
 ### Exit codes
 
@@ -101,85 +87,80 @@ cargo run -- ~/Music
 
 ## Supported formats
 
-`.mp3`, `.flac`, `.wav`, `.ogg`, `.oga`, `.opus`, `.m4a`, `.mp4`, `.aac`.
+`.mp3`, `.flac`, `.wav`, `.ogg`, `.oga`, `.m4a`, `.mp4`, `.aac`.
 
-- Decoding is handled by [Symphonia](https://github.com/pdeljanov/Symphonia)
-  through [Rodio](https://github.com/RustAudio/rodio).
-- **M4A/AAC is a required format** for this project and is verified to play.
+- Decoding is handled by Symphonia through Rodio. MP3, FLAC, WAV, OGG Vorbis,
+  and M4A/AAC are decoded by the pinned stack.
 - **Opus is a known gap:** the pinned Rodio/Symphonia stack does not decode
-  Opus. `.opus`/`.oga` files are listed but will be reported as skipped.
+  Opus, so `.opus`/`.oga` files are listed but skipped on playback.
 - Non-audio files and symlinks are ignored.
-- If a file has no metadata, the title falls back to the file name (without
-  extension) and artist/album/duration show as unknown.
+- Metadata fallback: the title uses the file stem; album and artist fall back to
+  the containing folder's name when tags are missing.
 
 ## Keys
 
 | Key | Action |
 |---|---|
-| `↑` / `↓` | Move selection in the active panel |
-| `Tab` | Switch focus between Library and Queue |
-| `Enter` | Open folder / play selected track (Library) or play selected queue item (Queue) |
-| `Backspace` | Go to parent directory (Library) |
+| `↑` / `↓` | Move selection |
+| `Tab` | Switch focus (Library / Queue) |
+| `1` / `2` / `3` / `4` | Songs / Albums / Artists / Playlists |
+| `/` | Global search (type to filter, `Esc` to leave) |
+| `Enter` | Play Now / open a playlist |
+| `a` | Add selection to the end of the queue |
+| `N` | Play Next (insert after the active track) |
+| `d` | Remove the selected queue entry (Queue view) |
+| `s` | Toggle shuffle |
+| `R` | Cycle repeat (Off → All → One → Off) |
+| `m` | Toggle Play Mode |
+| `T` | Cycle theme |
+| `?` | Toggle help |
+| `c` / `e` / `D` / `x` | Create / rename / duplicate / delete playlist |
+| `P` | Add the selection to a playlist |
+| `I` / `E` | Import / export an M3U playlist |
+| `J` / `K` / `S` | Move track down / up / sort (inside a playlist) |
+| `Esc` / `Backspace` | Back (leave a playlist, cancel a picker) |
 | `Space` | Play / Pause |
-| `n` | Next track |
-| `p` | Previous / restart (restart if played > 3s, else previous track) |
-| `+` / `=` | Volume up (5% step) |
-| `-` | Volume down (5% step) |
+| `n` / `p` | Next / previous track (previous restarts if played > 3s) |
+| `+` / `-` | Volume up / down (5% step) |
+| `r` | Rescan the library |
 | `q` | Quit and stop playback |
-
-Volume starts at 70% each run; configuration is not persisted (out of MVP
-scope).
-
-## Queue behavior
-
-Selecting an audio file replaces the queue entirely:
-
-1. The selected track becomes the first item.
-2. The selected track's folder and all subfolders are scanned recursively.
-3. Other tracks follow in deterministic traversal order (folders before files,
-   names sorted case-insensitively, tracks sorted by number then name).
-4. The selected track never appears twice.
-
-Navigating folders does not change the queue. Selecting an item in the Queue
-panel jumps playback to that item.
 
 ## Manual test plan
 
-Run the app against a folder containing your audio files and verify:
+Run the app against a folder of real audio files and verify:
 
-1. **Playback** — select a track, press `Enter`, and confirm audio is audible.
-2. **M4A** — repeat with a real `.m4a` file (required format).
-3. **Pause/resume** — press `Space` twice and confirm playback pauses and resumes.
-4. **Next/previous** — press `n`; press `p` after > 3s (restarts) and within 3s
-   (goes to previous).
-5. **Volume** — press `+`/`-` and confirm the level changes.
-6. **Progress** — confirm the position and progress bar advance during playback.
-7. **Auto-next / end** — let the last track finish; playback stops after the
-   last queue item and does not repeat.
-8. **Bad file** — include a corrupt audio file; confirm it is skipped and the
-   next track plays without crashing.
-9. **Empty/unreadable folder** — confirm an informative status message appears.
-10. **Small terminal** — shrink the terminal below 60x20; confirm a clear
-    warning is shown instead of a broken UI.
-11. **Terminal restore** — quit with `q` and confirm the terminal is restored.
+1. **Formats** — play a real file of each type: MP3, FLAC, WAV, OGG Vorbis, and
+   M4A/AAC. (Opus is a known gap.)
+2. **Persistence** — set a root, quit, relaunch; the root, index, playlists, and
+   volume are restored without auto-play.
+3. **Watcher** — add, rename, and delete files while the app runs; the library
+   updates without restarting.
+4. **Views / search** — switch Songs/Albums/Artists/Playlists; search returns
+   typed results.
+5. **Queue** — Play Now/Next/Add/remove; shuffle on/off keeps the active track;
+   repeat Off/All/One behave correctly.
+6. **Playlists** — create/rename/duplicate/delete, reorder, sort, and M3U
+   import/export.
+7. **Play Mode / themes** — toggle `m`, cycle `T`, open `?` help.
+8. **Artwork** — embedded art and folder images are detected (rendered as a
+   themed placeholder).
+9. **Error handling** — corrupt/unavailable files are skipped without crashing.
+10. **Terminal restore** — quit normally and via handled errors; the terminal is
+    always restored.
 
 ## Development
 
 ```sh
-cargo fmt
+cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
+cargo test --locked
+cargo build --release --locked
 ```
 
-Tests cover track-number parsing, deterministic sorting, metadata fallback,
-recursive scanning, queue construction, queue navigation, and the previous
-rule. Tests that require an audio device are performed manually.
-
-## Documentation
-
-- `README.md` (this file) — install, usage, formats, keymap, manual test plan
-- `docs/PRD.md` — product requirements
-- `docs/QA.md` — QA report, test evidence, and traceability matrix
+Automated tests cover configuration, database persistence/migrations, scanning,
+catalog grouping/sorting/search, queue operations (including shuffle/repeat),
+M3U parsing, artwork resolution, theme selection, and keyboard mapping. Tests
+that require an audio device or a real terminal are manual (above).
 
 ## Project structure
 
@@ -189,24 +170,36 @@ src/
   lib.rs       library crate root (enables integration testing)
   app.rs       application state and decisions
   input.rs     keyboard -> action mapping
-  ui.rs        rendering
-  library.rs   filesystem, formats, metadata, sorting, scanning, queue building
+  ui.rs        rendering (views, Play Mode, help, theme-aware)
+  library.rs   filesystem, formats, metadata, scanning
+  catalog.rs   grouping/sorting of the index + global search
+  indexer.rs   background scan worker + filesystem watcher
+  db.rs        SQLite persistence (index + playlists) and migrations
+  config.rs    commented TOML preferences
+  m3u.rs       M3U import/export
+  artwork.rs   artwork resolution (embedded / folder / placeholder)
+  theme.rs     color themes
   player.rs    audio playback
-  models.rs    shared types (Track, LibraryItem, Queue, Action, ...)
+  models.rs    shared types (Track, Queue, Action, ...)
 docs/
-  PRD.md       product requirements
-  QA.md        quality assurance report
+  PRD.md       v0.1 product requirements (baseline)
+  QA.md        v0.1 quality assurance report
+upgrade/
+  prd_upgrade.md  v0.2 requirements
 packaging/
   build-deb.sh builds a Debian package into dist/
 tests/
-  library_tests.rs
-  queue_tests.rs
-  cli_tests.rs
+  library_tests.rs  queue_tests.rs  cli_tests.rs  config_tests.rs
+  db_tests.rs  m3u_tests.rs  artwork_tests.rs
 ```
 
 ## Known limitations
 
-- Directory listing reads metadata synchronously; very large folders may cause a
-  brief pause (no async runtime in the MVP).
-- Opus is not supported by the current backend (see above).
-- Queue and volume are not persisted between sessions (out of MVP scope).
+- **Opus is not decoded** by the pinned Rodio/Symphonia stack.
+- **Artwork is rendered as a themed placeholder**, not as pixels: displaying the
+  actual image requires an image-decoding dependency and a terminal image
+  protocol (kitty/sixel), which are not enabled.
+- The filesystem watcher triggers a full rescan (debounced); very large
+  libraries may see a brief pause while metadata is read in the background.
+- M3U import adds found paths to the index; tracks outside the library root are
+  marked unavailable on the next rescan.
