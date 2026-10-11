@@ -12,7 +12,14 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use rayap_musik::{app::App, input, library, models::Action, ui};
+use rayap_musik::{
+    app::App,
+    config::{self, Config},
+    db::Db,
+    input, library,
+    models::Action,
+    ui,
+};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -27,21 +34,27 @@ const HELP: &str = "\
 rayap-musik — a local-first terminal music player for Linux
 
 USAGE:
-    rayap-musik <music-directory>
+    rayap-musik [<music-directory>]
     rayap-musik --help
     rayap-musik --version
 
 ARGUMENTS:
-    <music-directory>    Root directory to browse. A leading `~` or `~/` is
-                         expanded using $HOME.
+    <music-directory>    Music directory to browse. A leading `~` or `~/` is
+                         expanded using $HOME. When provided, it is saved as
+                         the library root for future launches. If omitted, the
+                         root stored in the configuration file is used.
 
 OPTIONS:
     -h, --help           Print this help and exit
     -V, --version        Print version and exit
 
 SUPPORTED FORMATS:
-    .mp3 .flac .wav .ogg .oga .opus .m4a .mp4 .aac
-    (M4A/AAC is fully supported; Opus is a known gap)
+    .mp3 .flac .wav .ogg .oga .m4a .mp4 .aac
+    (Opus is not decoded by the current stack and is a known gap)
+
+CONFIGURATION:
+    Settings are stored in a commented TOML file. Its location follows the XDG
+    spec: $XDG_CONFIG_HOME/rayap-musik/config.toml (default ~/.config/...).
 
 KEYS:
     Up / Down       Move selection in the active panel
@@ -124,17 +137,25 @@ fn start() -> Result<(), i32> {
         }
     }
 
-    let raw_root = match positional.as_slice() {
-        [] => {
-            eprintln!("rayap-musik: missing root directory argument");
-            eprintln!("Usage: rayap-musik <music-directory>");
-            eprintln!("Try 'rayap-musik --help' for more information.");
-            return Err(EXIT_USAGE);
-        }
-        [root] => root.clone(),
-        _ => {
-            eprintln!("rayap-musik: too many arguments");
-            eprintln!("Usage: rayap-musik <music-directory>");
+    let mut config = Config::load();
+
+    if positional.len() > 1 {
+        eprintln!("rayap-musik: too many arguments");
+        eprintln!("Usage: rayap-musik [<music-directory>]");
+        eprintln!("Try 'rayap-musik --help' for more information.");
+        return Err(EXIT_USAGE);
+    }
+
+    let raw_root = match positional.first() {
+        Some(root) => Some(root.clone()),
+        None => config.root.clone(),
+    };
+
+    let raw_root = match raw_root {
+        Some(raw_root) => raw_root,
+        None => {
+            eprintln!("rayap-musik: no music directory configured");
+            eprintln!("Run 'rayap-musik <music-directory>' to set your library root.");
             return Err(EXIT_USAGE);
         }
     };
@@ -148,6 +169,20 @@ fn start() -> Result<(), i32> {
         }
     };
 
+    config.root = Some(raw_root);
+    if let Err(error) = config.save() {
+        eprintln!("rayap-musik: warning: could not save configuration: {error}");
+    }
+
+    let db_path = Path::new(&config.advanced.data_dir).join(config::DB_FILE);
+    let _db = match Db::open(&db_path) {
+        Ok(db) => Some(db),
+        Err(error) => {
+            eprintln!("rayap-musik: warning: database unavailable: {error}");
+            None
+        }
+    };
+
     let mut guard = match TerminalGuard::enter() {
         Ok(guard) => guard,
         Err(error) => {
@@ -156,8 +191,14 @@ fn start() -> Result<(), i32> {
         }
     };
 
-    let app = App::new(root);
-    let result = run(&mut guard.terminal, app);
+    let mut app = App::new(root, config.volume());
+    let result = run(&mut guard.terminal, &mut app);
+
+    config.volume = app.volume;
+    if let Err(error) = config.save() {
+        eprintln!("rayap-musik: warning: could not save configuration: {error}");
+    }
+
     drop(guard);
 
     if let Err(error) = result {
@@ -167,10 +208,10 @@ fn start() -> Result<(), i32> {
     Ok(())
 }
 
-fn run(terminal: &mut Terminal<Backend>, mut app: App) -> io::Result<()> {
+fn run(terminal: &mut Terminal<Backend>, app: &mut App) -> io::Result<()> {
     while !app.should_quit {
         app.tick();
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        terminal.draw(|frame| ui::draw(frame, app))?;
 
         if event::poll(EVENT_POLL_INTERVAL)? {
             match event::read()? {

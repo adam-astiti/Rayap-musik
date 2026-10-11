@@ -15,6 +15,9 @@ ratatui = "0.28"
 crossterm = "0.28"
 lofty = "0.21"
 rodio = "0.21"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [profile.release]
 lto = true

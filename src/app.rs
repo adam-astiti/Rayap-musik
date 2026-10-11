@@ -44,10 +44,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf, volume: u8) -> Self {
+        let volume = volume.min(100);
         let (player, player_error) = match Player::new() {
             Ok(player) => {
-                player.set_volume_percent(DEFAULT_VOLUME);
+                player.set_volume_percent(volume);
                 (Some(player), None)
             }
             Err(error) => (None, Some(error.to_string())),
@@ -62,7 +63,7 @@ impl App {
             queue: Queue::default(),
             queue_selected: 0,
             playback: PlaybackState::default(),
-            volume: DEFAULT_VOLUME,
+            volume,
             should_quit: false,
             status: String::new(),
             player,

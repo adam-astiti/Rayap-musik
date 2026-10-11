@@ -114,6 +114,14 @@ impl LibraryItem {
     }
 }
 
+/// A persisted playlist. Track membership and ordering are stored in the
+/// database; this is the lightweight identity used by the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Playlist {
+    pub id: i64,
+    pub name: String,
+}
+
 /// In-memory playback queue. The queue is not persisted between sessions.
 #[derive(Debug, Clone, Default)]
 pub struct Queue {

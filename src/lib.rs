@@ -4,6 +4,8 @@
 //! be exercised by integration tests in `tests/`.
 
 pub mod app;
+pub mod config;
+pub mod db;
 pub mod input;
 pub mod library;
 pub mod models;

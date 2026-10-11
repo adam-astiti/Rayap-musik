@@ -6,10 +6,13 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_rayap-musik")
 }
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct Output {
     code: Option<i32>,
@@ -18,10 +21,24 @@ struct Output {
 }
 
 fn run(args: &[&str]) -> Output {
+    // Isolate config and data dirs so tests never touch the developer's real
+    // settings and each run starts from a clean, unconfigured state.
+    let unique = format!(
+        "rayap-musik-cli-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let base = std::env::temp_dir().join(unique);
+
     let output = Command::new(binary())
         .args(args)
+        .env("XDG_CONFIG_HOME", base.join("config"))
+        .env("XDG_DATA_HOME", base.join("data"))
         .output()
         .expect("run binary");
+
+    let _ = std::fs::remove_dir_all(&base);
+
     Output {
         code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -56,7 +73,7 @@ fn version_flag_prints_version_and_exits_zero() {
 fn no_arguments_errors_with_usage_code() {
     let out = run(&[]);
     assert_eq!(out.code, Some(2));
-    assert!(out.stderr.contains("missing root directory"));
+    assert!(out.stderr.contains("no music directory configured"));
 }
 
 #[test]
