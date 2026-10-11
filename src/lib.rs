@@ -4,6 +4,7 @@
 //! be exercised by integration tests in `tests/`.
 
 pub mod app;
+pub mod catalog;
 pub mod config;
 pub mod db;
 pub mod indexer;

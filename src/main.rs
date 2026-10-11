@@ -59,8 +59,9 @@ CONFIGURATION:
 KEYS:
     Up / Down       Move selection in the active panel
     Tab             Switch focus between Library and Queue
-    Enter           Open folder / play selected track or queue item
-    Backspace       Go to parent directory (Library)
+    1 / 2 / 3 / 4   Switch view: Songs / Albums / Artists / Playlists
+    /               Global search (type to filter, Esc to leave)
+    Enter           Play Now: selected track, album, artist, or playlist
     Space           Play / Pause
     n               Next track
     p               Previous / restart (restart if played > 3s)
@@ -217,7 +218,7 @@ fn run(terminal: &mut Terminal<Backend>, app: &mut App) -> io::Result<()> {
         if event::poll(EVENT_POLL_INTERVAL)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if let Some(action) = input::map_key(key) {
+                    if let Some(action) = input::map_key(key, app.is_searching()) {
                         app.handle_action(action);
                     }
                 }

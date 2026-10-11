@@ -1,13 +1,14 @@
 //! Application state and decision making.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::catalog::{self, Catalog};
 use crate::db::Db;
 use crate::indexer::{IndexEvent, Indexer};
-use crate::library;
 use crate::models::{
-    previous_action, Action, Focus, LibraryItem, PlaybackState, PreviousAction, Queue, Track,
+    previous_action, Action, Focus, LibraryView, PlaybackState, Playlist, PreviousAction, Queue,
+    Track,
 };
 use crate::player::Player;
 
@@ -27,11 +28,19 @@ pub fn change_volume(current: u8, delta: i8) -> u8 {
 const RESTART_THRESHOLD: Duration = Duration::from_secs(3);
 
 pub struct App {
-    /// Validated root directory; parent navigation never goes above it.
+    /// Validated root directory.
     pub root: PathBuf,
-    /// Directory currently displayed in the browser.
-    pub current_dir: PathBuf,
-    pub items: Vec<LibraryItem>,
+    /// Active library section.
+    pub view: LibraryView,
+    /// Sorted and grouped view of the indexed tracks.
+    pub catalog: Catalog,
+    /// Persisted playlists (names only; membership is read on demand).
+    pub playlists: Vec<Playlist>,
+    /// Current global-search query (empty when not searching).
+    pub search_query: String,
+    /// Results for the current search query.
+    pub search_results: Vec<catalog::SearchEntry>,
+    /// Selection index within the library panel.
     pub selected: usize,
     pub focus: Focus,
     /// In-memory playback queue.
@@ -65,9 +74,12 @@ impl App {
         };
 
         let mut app = Self {
-            current_dir: root.clone(),
             root,
-            items: Vec::new(),
+            view: LibraryView::Songs,
+            catalog: Catalog::default(),
+            playlists: Vec::new(),
+            search_query: String::new(),
+            search_results: Vec::new(),
             selected: 0,
             focus: Focus::Library,
             queue: Queue::default(),
@@ -80,40 +92,12 @@ impl App {
             db,
             indexer,
         };
-        app.reload_directory();
+        app.reload_catalog();
         if let Some(error) = player_error {
             // Surface the audio failure instead of the directory status.
             app.status = format!("Audio unavailable: {error}");
         }
         app
-    }
-
-    /// Re-read the current directory, resetting selection.
-    pub fn reload_directory(&mut self) {
-        match library::list_directory(&self.current_dir) {
-            Ok(items) => {
-                self.items = items;
-                self.selected = 0;
-                self.status = if self.items.is_empty() {
-                    format!("Empty: no audio files in {}", self.current_dir.display())
-                } else {
-                    format!(
-                        "{} item(s) in {}",
-                        self.items.len(),
-                        self.current_dir.display()
-                    )
-                };
-            }
-            Err(error) => {
-                self.items.clear();
-                self.selected = 0;
-                self.status = error.to_string();
-            }
-        }
-    }
-
-    pub fn selected_item(&self) -> Option<&LibraryItem> {
-        self.items.get(self.selected)
     }
 
     pub fn audio_available(&self) -> bool {
@@ -135,6 +119,34 @@ impl App {
         self.player.as_ref().and_then(Player::duration)
     }
 
+    /// Number of selectable items in the active library view.
+    pub fn library_len(&self) -> usize {
+        match self.view {
+            LibraryView::Songs => self.catalog.songs.len(),
+            LibraryView::Albums => self.catalog.albums.len(),
+            LibraryView::Artists => self.catalog.artists.len(),
+            LibraryView::Playlists => self.playlists.len(),
+            LibraryView::Search => self.search_results.len(),
+        }
+    }
+
+    /// Whether the app is currently capturing text for the search query.
+    pub fn is_searching(&self) -> bool {
+        self.view == LibraryView::Search
+    }
+
+    /// The selected library entry as a single song, when it is one.
+    fn selected_song(&self) -> Option<Track> {
+        match self.view {
+            LibraryView::Songs => self.catalog.songs.get(self.selected).cloned(),
+            LibraryView::Search => match self.search_results.get(self.selected) {
+                Some(catalog::SearchEntry::Song(track)) => Some(track.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Apply an action to the state.
     pub fn handle_action(&mut self, action: Action) {
         match action {
@@ -145,13 +157,17 @@ impl App {
                 self.status = format!("Focus: {}", self.focus.label());
             }
             Action::Enter => self.enter(),
-            Action::GoUp => self.go_to_parent(),
             Action::TogglePlay => self.toggle_play(),
             Action::NextTrack => self.next(),
             Action::PreviousTrack => self.previous(),
             Action::VolumeUp => self.set_volume(change_volume(self.volume, VOLUME_STEP as i8)),
             Action::VolumeDown => self.set_volume(change_volume(self.volume, -(VOLUME_STEP as i8))),
             Action::Rescan => self.rescan_library(),
+            Action::SwitchView(view) => self.switch_view(view),
+            Action::StartSearch => self.start_search(),
+            Action::SearchChar(ch) => self.type_search_char(ch),
+            Action::SearchBackspace => self.search_backspace(),
+            Action::SearchCancel => self.search_cancel(),
             Action::Quit => self.should_quit = true,
             Action::Resize => {}
         }
@@ -184,7 +200,7 @@ impl App {
 
     fn move_selection(&mut self, delta: i32) {
         let (selected, len) = match self.focus {
-            Focus::Library => (self.selected, self.items.len()),
+            Focus::Library => (self.selected, self.library_len()),
             Focus::Queue => (self.queue_selected, self.queue.len()),
         };
         if len == 0 {
@@ -196,6 +212,63 @@ impl App {
             Focus::Library => self.selected = next,
             Focus::Queue => self.queue_selected = next,
         }
+    }
+
+    fn switch_view(&mut self, view: LibraryView) {
+        self.view = view;
+        self.selected = 0;
+        self.search_query.clear();
+        self.search_results.clear();
+        self.status = view.label().to_string();
+    }
+
+    fn start_search(&mut self) {
+        self.view = LibraryView::Search;
+        self.selected = 0;
+        self.search_query.clear();
+        self.search_results.clear();
+        self.status = "Search: type to filter".to_string();
+    }
+
+    fn type_search_char(&mut self, ch: char) {
+        self.search_query.push(ch);
+        self.selected = 0;
+        self.refresh_search();
+    }
+
+    fn search_backspace(&mut self) {
+        self.search_query.pop();
+        self.selected = 0;
+        self.refresh_search();
+    }
+
+    fn search_cancel(&mut self) {
+        self.view = LibraryView::Songs;
+        self.search_query.clear();
+        self.search_results.clear();
+        self.selected = 0;
+        self.status = "Search cancelled".to_string();
+    }
+
+    fn refresh_search(&mut self) {
+        self.search_results = catalog::search(&self.catalog, &self.playlists, &self.search_query);
+    }
+
+    /// Rebuild the in-memory catalog and playlist list from the database.
+    fn reload_catalog(&mut self) {
+        self.catalog = match &self.db {
+            Some(db) => db
+                .list_available_tracks()
+                .map(catalog::build_catalog)
+                .unwrap_or_default(),
+            None => Catalog::default(),
+        };
+        self.playlists = match &self.db {
+            Some(db) => db.list_playlists().unwrap_or_default(),
+            None => Vec::new(),
+        };
+        self.selected = self.selected.min(self.library_len().saturating_sub(1));
+        self.refresh_search();
     }
 
     fn rescan_library(&mut self) {
@@ -229,6 +302,7 @@ impl App {
                         },
                         None => self.status = format!("Indexed {count} track(s) (not persisted)"),
                     }
+                    self.reload_catalog();
                 }
                 IndexEvent::WatcherError { error } => {
                     self.status = format!("Filesystem watcher unavailable: {error}");
@@ -239,17 +313,7 @@ impl App {
 
     fn enter(&mut self) {
         match self.focus {
-            Focus::Library => match self.selected_item() {
-                Some(LibraryItem::Directory { path, .. }) => {
-                    self.current_dir = path.clone();
-                    self.reload_directory();
-                }
-                Some(LibraryItem::Track(track)) => {
-                    let path = track.path.clone();
-                    self.replace_queue_and_play(&path);
-                }
-                None => {}
-            },
+            Focus::Library => self.enter_library(),
             Focus::Queue => {
                 if self.queue_selected < self.queue.len() {
                     self.queue.set_current(self.queue_selected);
@@ -259,23 +323,58 @@ impl App {
         }
     }
 
-    fn go_to_parent(&mut self) {
-        if self.focus != Focus::Library {
-            return;
-        }
-        if self.current_dir == self.root {
-            self.status = "Already at root".to_string();
-            return;
-        }
-        if let Some(parent) = self.current_dir.parent() {
-            self.current_dir = parent.to_path_buf();
-            self.reload_directory();
+    fn enter_library(&mut self) {
+        match self.view {
+            LibraryView::Songs => {
+                if let Some(track) = self.catalog.songs.get(self.selected).cloned() {
+                    self.play_now(vec![track]);
+                }
+            }
+            LibraryView::Albums => {
+                if let Some(album) = self.catalog.albums.get(self.selected) {
+                    self.play_now(album.tracks.clone());
+                }
+            }
+            LibraryView::Artists => {
+                if let Some(artist) = self.catalog.artists.get(self.selected) {
+                    self.play_now(artist.tracks.clone());
+                }
+            }
+            LibraryView::Playlists => {
+                if let Some(id) = self.playlists.get(self.selected).map(|p| p.id) {
+                    let tracks = self
+                        .db
+                        .as_ref()
+                        .and_then(|db| db.playlist_tracks(id).ok())
+                        .unwrap_or_default();
+                    self.play_now(tracks);
+                }
+            }
+            LibraryView::Search => match self.search_results.get(self.selected).cloned() {
+                Some(catalog::SearchEntry::Song(track)) => self.play_now(vec![track]),
+                Some(catalog::SearchEntry::Album(album)) => self.play_now(album.tracks),
+                Some(catalog::SearchEntry::Artist(artist)) => self.play_now(artist.tracks),
+                Some(catalog::SearchEntry::Playlist(playlist)) => {
+                    let tracks = self
+                        .db
+                        .as_ref()
+                        .and_then(|db| db.playlist_tracks(playlist.id).ok())
+                        .unwrap_or_default();
+                    self.play_now(tracks);
+                }
+                None => {}
+            },
         }
     }
 
-    /// Replace the queue with the subtree of `path` and start playing (FR-05).
-    fn replace_queue_and_play(&mut self, path: &Path) {
-        let tracks = library::build_queue(path);
+    /// Replace the queue with the given collection and start playing (FR-PLAY-03).
+    ///
+    /// An empty source leaves the current queue untouched and shows a message.
+    fn play_now(&mut self, tracks: Vec<Track>) {
+        if tracks.is_empty() {
+            self.status = "No playable tracks".to_string();
+            return;
+        }
         self.queue = Queue::from_tracks(tracks);
         self.queue_selected = 0;
         self.start_playback();
@@ -386,8 +485,8 @@ impl App {
         if !has_track || finished {
             if !self.queue.is_empty() {
                 self.start_playback();
-            } else if let Some(LibraryItem::Track(track)) = self.selected_item().cloned() {
-                self.replace_queue_and_play(&track.path);
+            } else if let Some(track) = self.selected_song() {
+                self.play_now(vec![track]);
             }
             return;
         }

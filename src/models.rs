@@ -1,6 +1,6 @@
 //! Shared data types used across modules.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Fallback text shown when a metadata field is unavailable.
@@ -81,39 +81,6 @@ impl Track {
 }
 
 /// An entry in the filesystem browser: either a subdirectory or an audio track.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LibraryItem {
-    Directory { path: PathBuf, name: String },
-    Track(Track),
-}
-
-impl LibraryItem {
-    pub fn name(&self) -> &str {
-        match self {
-            LibraryItem::Directory { name, .. } => name,
-            LibraryItem::Track(track) => &track.title,
-        }
-    }
-
-    pub fn path(&self) -> &Path {
-        match self {
-            LibraryItem::Directory { path, .. } => path,
-            LibraryItem::Track(track) => &track.path,
-        }
-    }
-
-    pub fn is_dir(&self) -> bool {
-        matches!(self, LibraryItem::Directory { .. })
-    }
-
-    pub fn as_track(&self) -> Option<&Track> {
-        match self {
-            LibraryItem::Track(track) => Some(track),
-            LibraryItem::Directory { .. } => None,
-        }
-    }
-}
-
 /// A persisted playlist. Track membership and ordering are stored in the
 /// database; this is the lightweight identity used by the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,13 +191,40 @@ pub enum Action {
     SelectDown,
     NextFocus,
     Enter,
-    GoUp,
     TogglePlay,
     NextTrack,
     PreviousTrack,
     VolumeUp,
     VolumeDown,
     Rescan,
+    SwitchView(LibraryView),
+    StartSearch,
+    SearchChar(char),
+    SearchBackspace,
+    SearchCancel,
     Quit,
     Resize,
+}
+
+/// Which section of the library is currently shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LibraryView {
+    #[default]
+    Songs,
+    Albums,
+    Artists,
+    Playlists,
+    Search,
+}
+
+impl LibraryView {
+    pub fn label(self) -> &'static str {
+        match self {
+            LibraryView::Songs => "Songs",
+            LibraryView::Albums => "Albums",
+            LibraryView::Artists => "Artists",
+            LibraryView::Playlists => "Playlists",
+            LibraryView::Search => "Search",
+        }
+    }
 }

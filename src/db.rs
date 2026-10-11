@@ -180,6 +180,20 @@ impl Db {
         Ok(tracks)
     }
 
+    /// Tracks that are currently available on disk (the source of the catalog).
+    pub fn list_available_tracks(&self) -> Result<Vec<Track>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, title, artist, album, track_number, duration_ms
+             FROM tracks WHERE available = 1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], track_from_row)?;
+        let mut tracks = Vec::new();
+        for row in rows {
+            tracks.push(row?);
+        }
+        Ok(tracks)
+    }
+
     pub fn create_playlist(&self, name: &str) -> Result<i64, DbError> {
         self.conn
             .execute("INSERT INTO playlists (name) VALUES (?1)", params![name])?;

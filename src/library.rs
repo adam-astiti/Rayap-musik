@@ -1,4 +1,4 @@
-//! Filesystem browsing, audio detection, metadata, and deterministic sorting.
+//! Filesystem scanning, audio detection, metadata, and deterministic sorting.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::{Accessor, ItemKey};
 
-use crate::models::{LibraryItem, Track};
+use crate::models::Track;
 
 /// File extensions treated as supported audio for the MVP.
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
@@ -111,58 +111,8 @@ fn path_name_key(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// List the directories and supported audio files inside `dir`.
-///
-/// Symlinks are ignored. The result is sorted deterministically by
-/// [`sort_items`]. An unreadable directory is reported as [`LibraryError::Io`].
-pub fn list_directory(dir: &Path) -> Result<Vec<LibraryItem>, LibraryError> {
-    let entries = fs::read_dir(dir).map_err(|source| LibraryError::Io {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-
-    let mut items = Vec::new();
-    for entry in entries.flatten() {
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
-        };
-        // FR-11: symlinks are ignored.
-        if file_type.is_symlink() {
-            continue;
-        }
-
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-
-        if file_type.is_dir() {
-            items.push(LibraryItem::Directory { path, name });
-        } else if file_type.is_file() && is_supported_audio(&path) {
-            items.push(LibraryItem::Track(read_track(&path)));
-        }
-    }
-
-    sort_items(&mut items);
-    Ok(items)
-}
-
-/// Sort browser items deterministically (FR-03).
-pub fn sort_items(items: &mut [LibraryItem]) {
-    items.sort_by(compare_items);
-}
-
-fn compare_items(a: &LibraryItem, b: &LibraryItem) -> Ordering {
-    match (a, b) {
-        (LibraryItem::Directory { name: na, .. }, LibraryItem::Directory { name: nb, .. }) => {
-            name_key(na).cmp(&name_key(nb))
-        }
-        (LibraryItem::Directory { .. }, LibraryItem::Track(_)) => Ordering::Less,
-        (LibraryItem::Track(_), LibraryItem::Directory { .. }) => Ordering::Greater,
-        (LibraryItem::Track(ta), LibraryItem::Track(tb)) => compare_tracks(ta, tb),
-    }
-}
-
-fn compare_tracks(a: &Track, b: &Track) -> Ordering {
+/// Compare two tracks by track number, falling back to file name (FR-03).
+pub fn compare_tracks(a: &Track, b: &Track) -> Ordering {
     match (a.track_number, b.track_number) {
         (Some(x), Some(y)) => x
             .cmp(&y)
@@ -173,35 +123,41 @@ fn compare_tracks(a: &Track, b: &Track) -> Ordering {
     }
 }
 
-/// Read metadata for `path`, falling back to sensible defaults (FR-02).
+/// Read metadata for `path`, falling back to sensible defaults (FR-02, FR-LIB-05).
 ///
-/// A file with missing or corrupt metadata still produces a usable `Track`;
-/// this function never fails.
+/// The title falls back to the file stem; album and artist fall back to the
+/// containing folder's name. A file with missing or corrupt metadata still
+/// produces a usable `Track`; this function never fails.
 pub fn read_track(path: &Path) -> Track {
     let fallback_title = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let folder_name = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .map(|name| name.to_string_lossy().into_owned());
 
     let mut track = Track {
         path: path.to_path_buf(),
         title: fallback_title,
-        artist: None,
-        album: None,
+        artist: folder_name.clone(),
+        album: folder_name,
         track_number: None,
         duration: None,
     };
 
     if let Ok(tagged) = lofty::read_from_path(path) {
         if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
-            if let Some(title) = tag.title() {
-                let title = title.trim();
-                if !title.is_empty() {
-                    track.title = title.to_string();
-                }
+            if let Some(title) = non_empty(tag.title().as_deref()) {
+                track.title = title;
             }
-            track.artist = non_empty(tag.artist().as_deref());
-            track.album = non_empty(tag.album().as_deref());
+            if let Some(artist) = non_empty(tag.artist().as_deref()) {
+                track.artist = Some(artist);
+            }
+            if let Some(album) = non_empty(tag.album().as_deref()) {
+                track.album = Some(album);
+            }
             track.track_number = tag
                 .get_string(&ItemKey::TrackNumber)
                 .and_then(parse_track_number);
@@ -223,94 +179,57 @@ fn non_empty(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Recursively collect supported audio files under `root` (FR-03, FR-05).
-///
-/// Order is deterministic: depth-first, subdirectories before the current
-/// directory's files, with names sorted case-insensitively at every level.
-/// Symlinks are not followed.
-pub fn scan_recursive(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    scan_dir(root, &mut files);
-    files
-}
-
-/// Build a playback queue for a selected track (FR-05).
-///
-/// The selected track is first, followed by every other audio file in the
-/// selected track's directory subtree, in deterministic traversal order, with
-/// no duplicates. Only the subtree is scanned; unrelated directories are
-/// excluded.
-pub fn build_queue(selected: &Path) -> Vec<Track> {
-    let selected_track = read_track(selected);
-    let mut tracks = vec![selected_track.clone()];
-
-    let Some(parent) = selected_track.path.parent() else {
-        return tracks;
-    };
-
-    let mut rest = Vec::new();
-    collect_tracks(parent, &mut rest);
-    for track in rest {
-        if track.path != selected_track.path {
-            tracks.push(track);
-        }
-    }
-    tracks
-}
-
 /// Recursively scan `root`, returning all supported audio tracks with metadata.
 ///
-/// Order is deterministic (directories before files, depth-first). This is the
-/// source for the persistent library index.
+/// Order is deterministic: depth-first, directories before files, tracks sorted
+/// by number then file name. This is the source for the persistent library index.
 pub fn scan_tracks(root: &Path) -> Vec<Track> {
     let mut tracks = Vec::new();
     collect_tracks(root, &mut tracks);
     tracks
 }
 
-/// Recursively collect tracks under `dir` in traversal order: subdirectories
-/// before files, names sorted case-insensitively, tracks sorted by number then
-/// file name (via [`list_directory`]).
-fn collect_tracks(dir: &Path, out: &mut Vec<Track>) {
-    let Ok(items) = list_directory(dir) else {
-        return;
-    };
-    for item in items {
-        match item {
-            LibraryItem::Directory { path, .. } => collect_tracks(&path, out),
-            LibraryItem::Track(track) => out.push(track),
-        }
-    }
-}
-
-fn scan_dir(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
+/// List the directories and audio tracks directly inside `dir`, each sorted
+/// deterministically. Symlinks are ignored.
+fn list_dir_entries(dir: &Path) -> Result<(Vec<PathBuf>, Vec<Track>), LibraryError> {
+    let entries = fs::read_dir(dir).map_err(|source| LibraryError::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
 
     let mut dirs = Vec::new();
-    let mut audio = Vec::new();
+    let mut tracks = Vec::new();
 
     for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
         };
         if file_type.is_symlink() {
             continue;
         }
+
         let path = entry.path();
         if file_type.is_dir() {
             dirs.push(path);
         } else if file_type.is_file() && is_supported_audio(&path) {
-            audio.push(path);
+            tracks.push(read_track(&path));
         }
     }
 
     dirs.sort_by_key(|path| path_name_key(path));
-    audio.sort_by_key(|path| path_name_key(path));
+    tracks.sort_by(compare_tracks);
+    Ok((dirs, tracks))
+}
 
+/// Recursively collect tracks under `dir`: subdirectories before files, names
+/// sorted case-insensitively, tracks sorted by number then file name.
+fn collect_tracks(dir: &Path, out: &mut Vec<Track>) {
+    let Ok((dirs, tracks)) = list_dir_entries(dir) else {
+        return;
+    };
     for subdir in dirs {
-        scan_dir(&subdir, files);
+        collect_tracks(&subdir, out);
     }
-    files.extend(audio);
+    out.extend(tracks);
 }

@@ -7,7 +7,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::models::{Focus, LibraryItem};
+use crate::catalog::SearchEntry;
+use crate::models::{Focus, LibraryView};
 
 /// Minimum usable terminal size before we show a warning instead of the UI.
 const MIN_WIDTH: u16 = 60;
@@ -71,11 +72,7 @@ fn panel_block(title: &str, focused: bool) -> Block<'static> {
 }
 
 fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
-    let shown = app
-        .current_track()
-        .or_else(|| app.selected_item().and_then(LibraryItem::as_track));
-
-    let lines = match shown {
+    let lines = match app.current_track() {
         Some(track) => vec![
             Line::from(Span::styled(
                 track.title.clone(),
@@ -94,7 +91,7 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
         ],
         None => vec![
             Line::from(Span::styled(
-                "No track selected",
+                "No track playing",
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
@@ -138,12 +135,18 @@ fn progress_bar(ratio: f64, width: usize) -> String {
 
 fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == Focus::Library;
-    let title = if focused { "> Library" } else { "  Library" };
-    let block = panel_block(title, focused);
+    let title = library_title(app, focused);
+    let block = panel_block(&title, focused);
 
-    if app.items.is_empty() {
+    let rows = library_rows(app);
+    if rows.is_empty() {
+        let message = if app.view == LibraryView::Search && app.search_query.is_empty() {
+            "Type to search".to_string()
+        } else {
+            "(empty)".to_string()
+        };
         frame.render_widget(
-            Paragraph::new("(empty)")
+            Paragraph::new(message)
                 .style(Style::default().fg(Color::DarkGray))
                 .block(block),
             area,
@@ -153,16 +156,15 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
 
     let inner_height = area.height.saturating_sub(2) as usize;
     let offset = if focused {
-        scroll_offset(app.selected, inner_height, app.items.len())
+        scroll_offset(app.selected, inner_height, rows.len())
     } else {
         0
     };
 
-    let lines: Vec<Line> = app
-        .items
+    let lines: Vec<Line> = rows
         .iter()
         .enumerate()
-        .map(|(index, item)| {
+        .map(|(index, label)| {
             let selected = focused && index == app.selected;
             let style = if selected {
                 Style::default()
@@ -172,7 +174,7 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default()
             };
-            Line::from(item_label(item)).style(style)
+            Line::from(label.clone()).style(style)
         })
         .collect();
 
@@ -184,13 +186,49 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn item_label(item: &LibraryItem) -> String {
-    match item {
-        LibraryItem::Directory { name, .. } => format!("[dir] {name}/"),
-        LibraryItem::Track(track) => match track.track_number {
-            Some(number) => format!("{number:>3}. {}", track.title),
-            None => format!("     {}", track.title),
-        },
+fn library_title(app: &App, focused: bool) -> String {
+    let marker = if focused { ">" } else { " " };
+    match app.view {
+        LibraryView::Search => format!("{marker} Search: \"{}\"", app.search_query),
+        view => format!("{marker} {}", view.label()),
+    }
+}
+
+fn library_rows(app: &App) -> Vec<String> {
+    match app.view {
+        LibraryView::Songs => app
+            .catalog
+            .songs
+            .iter()
+            .map(|track| format!("{} — {}", track.artist_label(), track.title))
+            .collect(),
+        LibraryView::Albums => app
+            .catalog
+            .albums
+            .iter()
+            .map(|album| format!("{} — {}", album.title, album.artist_label))
+            .collect(),
+        LibraryView::Artists => app
+            .catalog
+            .artists
+            .iter()
+            .map(|artist| artist.name.clone())
+            .collect(),
+        LibraryView::Playlists => app
+            .playlists
+            .iter()
+            .map(|playlist| playlist.name.clone())
+            .collect(),
+        LibraryView::Search => app.search_results.iter().map(search_label).collect(),
+    }
+}
+
+fn search_label(entry: &SearchEntry) -> String {
+    match entry {
+        SearchEntry::Song(track) => format!("[Song] {} — {}", track.artist_label(), track.title),
+        SearchEntry::Album(album) => format!("[Album] {} — {}", album.title, album.artist_label),
+        SearchEntry::Artist(artist) => format!("[Artist] {}", artist.name),
+        SearchEntry::Playlist(playlist) => format!("[Playlist] {}", playlist.name),
     }
 }
 
@@ -258,7 +296,7 @@ fn draw_queue(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
-    let help = "Tab: focus  Enter: open/play  Backspace: parent  Space: play  n/p: track  +/-: vol  q: quit";
+    let help = "1-4: view  /: search  Enter: play  Space: play/pause  n/p: track  +/-: vol  r: rescan  q: quit";
     let text = vec![
         Line::from(Span::styled(
             app.status.clone(),
