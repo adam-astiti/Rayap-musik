@@ -11,7 +11,7 @@ use crate::library;
 use crate::m3u;
 use crate::models::{
     previous_action, wrap_selection, Action, Focus, InputMode, LibraryView, PlaybackState,
-    Playlist, PreviousAction, Queue, RepeatMode, Track,
+    Playlist, PreviousAction, Queue, RepeatMode, SearchCategory, Track,
 };
 use crate::player::Player;
 use crate::theme::{self, Theme};
@@ -46,6 +46,17 @@ struct Prompt {
     buffer: String,
 }
 
+/// A saved navigation point, pushed onto the back stack before entering a
+/// detail view or the Search interface so Back can restore it.
+#[derive(Debug, Clone)]
+struct NavLocation {
+    view: LibraryView,
+    selected: usize,
+    search_query: String,
+    search_category: SearchCategory,
+    search_editing: bool,
+}
+
 pub struct App {
     /// Validated root directory.
     pub root: PathBuf,
@@ -57,12 +68,20 @@ pub struct App {
     pub playlists: Vec<Playlist>,
     /// The playlist currently being browsed, if any.
     pub open_playlist: Option<Playlist>,
-    /// Tracks of the currently browsed playlist.
+    /// The album detail currently being browsed, if any.
+    pub open_album: Option<catalog::Album>,
+    /// The artist detail currently being browsed, if any.
+    pub open_artist: Option<catalog::Artist>,
+    /// Tracks of the currently browsed detail view (playlist/album/artist).
     pub open_tracks: Vec<Track>,
     /// Current global-search query (empty when not searching).
     pub search_query: String,
-    /// Results for the current search query.
-    pub search_results: Vec<catalog::SearchEntry>,
+    /// The active result category in the Search interface.
+    pub search_category: SearchCategory,
+    /// Whether the search query is being edited (`true`) or results navigated.
+    pub search_editing: bool,
+    /// Results for the current search query, grouped by category.
+    pub search_results: catalog::SearchResults,
     /// Selection index within the library panel.
     pub selected: usize,
     pub focus: Focus,
@@ -87,6 +106,7 @@ pub struct App {
     picker_return: Option<LibraryView>,
     confirm_delete: Option<i64>,
     prompt: Option<Prompt>,
+    back_stack: Vec<NavLocation>,
 }
 
 impl App {
@@ -112,9 +132,13 @@ impl App {
             catalog: Catalog::default(),
             playlists: Vec::new(),
             open_playlist: None,
+            open_album: None,
+            open_artist: None,
             open_tracks: Vec::new(),
             search_query: String::new(),
-            search_results: Vec::new(),
+            search_category: SearchCategory::default(),
+            search_editing: true,
+            search_results: catalog::SearchResults::default(),
             selected: 0,
             focus: Focus::Library,
             queue: Queue::default(),
@@ -136,6 +160,7 @@ impl App {
             picker_return: None,
             confirm_delete: None,
             prompt: None,
+            back_stack: Vec::new(),
         };
         app.reload_catalog();
         if let Some(error) = player_error {
@@ -163,17 +188,18 @@ impl App {
         self.player.as_ref().and_then(Player::duration)
     }
 
-    /// Whether the app is capturing text (search query or a prompt).
-    pub fn text_input_active(&self) -> bool {
-        self.view == LibraryView::Search || self.prompt.is_some()
-    }
-
     /// The input mode that determines how key events are interpreted.
     pub fn input_mode(&self) -> InputMode {
         if self.show_help {
             InputMode::Help
-        } else if self.text_input_active() {
-            InputMode::Text
+        } else if self.view == LibraryView::Search {
+            if self.search_editing {
+                InputMode::SearchEdit
+            } else {
+                InputMode::SearchResults
+            }
+        } else if self.prompt.is_some() {
+            InputMode::Prompt
         } else {
             InputMode::Normal
         }
@@ -189,7 +215,7 @@ impl App {
             Context::TextInput
         } else if self.picker_active() {
             Context::Playlists
-        } else if self.open_playlist.is_some() {
+        } else if self.detail_open() {
             Context::OpenPlaylist
         } else if self.focus == Focus::Queue {
             Context::Queue
@@ -231,7 +257,7 @@ impl App {
         if self.picker_active() {
             return self.playlists.len();
         }
-        if self.open_playlist.is_some() {
+        if self.detail_open() {
             return self.open_tracks.len();
         }
         match self.view {
@@ -239,21 +265,24 @@ impl App {
             LibraryView::Albums => self.catalog.albums.len(),
             LibraryView::Artists => self.catalog.artists.len(),
             LibraryView::Playlists => self.playlists.len(),
-            LibraryView::Search => self.search_results.len(),
+            LibraryView::Search => self.search_results.count(self.search_category),
         }
     }
 
     /// The selected library entry as a single song, when it is one.
     fn selected_song(&self) -> Option<Track> {
-        if self.open_playlist.is_some() {
+        if self.detail_open() {
             return self.open_tracks.get(self.selected).cloned();
         }
         match self.view {
             LibraryView::Songs => self.catalog.songs.get(self.selected).cloned(),
-            LibraryView::Search => match self.search_results.get(self.selected) {
-                Some(catalog::SearchEntry::Song(track)) => Some(track.clone()),
-                _ => None,
-            },
+            LibraryView::Search => {
+                if self.search_category == SearchCategory::Songs {
+                    self.search_results.songs.get(self.selected).cloned()
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -283,11 +312,14 @@ impl App {
             Action::Rescan => self.rescan_library(),
             Action::SwitchView(view) => self.switch_view(view),
             Action::StartSearch => self.start_search(),
+            Action::SwitchSearchCategory(category) => self.switch_search_category(category),
+            Action::ToggleSearchFocus => self.toggle_search_focus(),
             Action::TypeChar(ch) => self.type_char(ch),
             Action::DeleteChar => self.delete_char(),
             Action::Cancel => self.cancel_text_input(),
             Action::PlayNext => self.play_next(),
             Action::AddToQueue => self.add_to_queue(),
+            Action::AddAllToQueue => self.add_all_to_queue(),
             Action::RemoveFromQueue => self.remove_from_queue(),
             Action::ToggleShuffle => self.toggle_shuffle(),
             Action::CycleRepeat => self.cycle_repeat(),
@@ -361,29 +393,55 @@ impl App {
     fn switch_view(&mut self, view: LibraryView) {
         self.view = view;
         self.selected = 0;
-        self.open_playlist = None;
-        self.open_tracks.clear();
+        self.close_detail();
         self.pending_add = None;
         self.picker_return = None;
         self.confirm_delete = None;
         self.prompt = None;
         self.search_query.clear();
-        self.search_results.clear();
+        self.search_category = SearchCategory::default();
+        self.search_editing = true;
+        self.search_results = catalog::SearchResults::default();
+        self.back_stack.clear();
         self.status = view.label().to_string();
     }
 
     fn start_search(&mut self) {
+        self.push_location();
         self.view = LibraryView::Search;
+        self.focus = Focus::Library;
         self.selected = 0;
-        self.open_playlist = None;
-        self.open_tracks.clear();
+        self.close_detail();
         self.pending_add = None;
         self.picker_return = None;
         self.confirm_delete = None;
         self.prompt = None;
         self.search_query.clear();
-        self.search_results.clear();
-        self.status = "Search: type to filter".to_string();
+        self.search_category = SearchCategory::default();
+        self.search_editing = true;
+        self.search_results = catalog::SearchResults::default();
+        self.status = "Search: type to filter ( / to browse results )".to_string();
+    }
+
+    fn switch_search_category(&mut self, category: SearchCategory) {
+        if self.view != LibraryView::Search {
+            return;
+        }
+        self.search_category = category;
+        self.selected = 0;
+    }
+
+    /// Toggle between editing the search query and navigating the results.
+    fn toggle_search_focus(&mut self) {
+        if self.view != LibraryView::Search {
+            return;
+        }
+        self.search_editing = !self.search_editing;
+        self.status = if self.search_editing {
+            "Search: editing query".to_string()
+        } else {
+            "Search: press / to edit, Enter/a/N/P/A on results".to_string()
+        };
     }
 
     fn type_char(&mut self, ch: char) {
@@ -421,11 +479,8 @@ impl App {
                 self.help_selected = 0;
             }
         } else if self.view == LibraryView::Search {
-            self.view = LibraryView::Songs;
-            self.search_query.clear();
-            self.search_results.clear();
-            self.selected = 0;
-            self.status = "Search cancelled".to_string();
+            self.restore_location();
+            self.status = "Search closed".to_string();
         } else if self.prompt.is_some() {
             self.prompt = None;
             self.status = "Cancelled".to_string();
@@ -527,23 +582,65 @@ impl App {
             self.commit_add(tracks);
             return;
         }
-        if let Some(playlist) = self.open_playlist.clone() {
-            let tracks = self
-                .db
-                .as_ref()
-                .and_then(|db| db.playlist_tracks(playlist.id).ok())
-                .unwrap_or_default();
-            self.play_now(tracks);
-            return;
-        }
-        if self.view == LibraryView::Playlists {
-            if let Some(playlist) = self.playlists.get(self.selected).cloned() {
-                self.open_playlist_detail(playlist);
+        if self.detail_open() {
+            if let Some(track) = self.open_tracks.get(self.selected).cloned() {
+                self.play_now(vec![track]);
             }
             return;
         }
-        if let Some(tracks) = self.selected_tracks() {
-            self.play_now(tracks);
+        match self.view {
+            LibraryView::Songs => {
+                if let Some(track) = self.catalog.songs.get(self.selected).cloned() {
+                    self.play_now(vec![track]);
+                }
+            }
+            LibraryView::Albums => {
+                if let Some(album) = self.catalog.albums.get(self.selected).cloned() {
+                    self.push_location();
+                    self.open_album_detail(album);
+                }
+            }
+            LibraryView::Artists => {
+                if let Some(artist) = self.catalog.artists.get(self.selected).cloned() {
+                    self.push_location();
+                    self.open_artist_detail(artist);
+                }
+            }
+            LibraryView::Playlists => {
+                if let Some(playlist) = self.playlists.get(self.selected).cloned() {
+                    self.push_location();
+                    self.open_playlist_detail(playlist);
+                }
+            }
+            LibraryView::Search => self.enter_search(),
+        }
+    }
+
+    fn enter_search(&mut self) {
+        match self.search_category {
+            SearchCategory::Songs => {
+                if let Some(track) = self.search_results.songs.get(self.selected).cloned() {
+                    self.play_now(vec![track]);
+                }
+            }
+            SearchCategory::Albums => {
+                if let Some(album) = self.search_results.albums.get(self.selected).cloned() {
+                    self.push_location();
+                    self.open_album_detail(album);
+                }
+            }
+            SearchCategory::Artists => {
+                if let Some(artist) = self.search_results.artists.get(self.selected).cloned() {
+                    self.push_location();
+                    self.open_artist_detail(artist);
+                }
+            }
+            SearchCategory::Playlists => {
+                if let Some(playlist) = self.search_results.playlists.get(self.selected).cloned() {
+                    self.push_location();
+                    self.open_playlist_detail(playlist);
+                }
+            }
         }
     }
 
@@ -553,7 +650,7 @@ impl App {
         if self.picker_active() {
             return None;
         }
-        if self.open_playlist.is_some() {
+        if self.detail_open() {
             return self
                 .open_tracks
                 .get(self.selected)
@@ -579,13 +676,32 @@ impl App {
                 .playlists
                 .get(self.selected)
                 .and_then(|playlist| self.playlist_tracks(playlist.id)),
-            LibraryView::Search => match self.search_results.get(self.selected).cloned() {
-                Some(catalog::SearchEntry::Song(track)) => Some(vec![track]),
-                Some(catalog::SearchEntry::Album(album)) => Some(album.tracks),
-                Some(catalog::SearchEntry::Artist(artist)) => Some(artist.tracks),
-                Some(catalog::SearchEntry::Playlist(playlist)) => self.playlist_tracks(playlist.id),
-                None => None,
-            },
+            LibraryView::Search => self.search_selected_tracks(),
+        }
+    }
+
+    fn search_selected_tracks(&self) -> Option<Vec<Track>> {
+        match self.search_category {
+            SearchCategory::Songs => self
+                .search_results
+                .songs
+                .get(self.selected)
+                .map(|track| vec![track.clone()]),
+            SearchCategory::Albums => self
+                .search_results
+                .albums
+                .get(self.selected)
+                .map(|album| album.tracks.clone()),
+            SearchCategory::Artists => self
+                .search_results
+                .artists
+                .get(self.selected)
+                .map(|artist| artist.tracks.clone()),
+            SearchCategory::Playlists => self
+                .search_results
+                .playlists
+                .get(self.selected)
+                .and_then(|playlist| self.playlist_tracks(playlist.id)),
         }
     }
 
@@ -600,21 +716,158 @@ impl App {
             .and_then(|db| db.playlist_tracks(playlist.id).ok())
             .unwrap_or_default();
         self.open_playlist = Some(playlist);
+        self.open_album = None;
+        self.open_artist = None;
         self.selected = 0;
+    }
+
+    fn open_album_detail(&mut self, album: catalog::Album) {
+        self.open_tracks = album.tracks.clone();
+        self.open_album = Some(album);
+        self.open_artist = None;
+        self.open_playlist = None;
+        self.selected = 0;
+    }
+
+    fn open_artist_detail(&mut self, artist: catalog::Artist) {
+        self.open_tracks = artist.tracks.clone();
+        self.open_artist = Some(artist);
+        self.open_album = None;
+        self.open_playlist = None;
+        self.selected = 0;
+    }
+
+    /// Whether any detail view (playlist/album/artist) is open.
+    pub fn detail_open(&self) -> bool {
+        self.open_playlist.is_some() || self.open_album.is_some() || self.open_artist.is_some()
+    }
+
+    fn close_detail(&mut self) {
+        self.open_playlist = None;
+        self.open_album = None;
+        self.open_artist = None;
+        self.open_tracks.clear();
+    }
+
+    /// The title of the open detail view, for the UI.
+    pub fn detail_label(&self) -> Option<String> {
+        self.open_playlist
+            .as_ref()
+            .map(|playlist| format!("Playlist: {}", playlist.name))
+            .or_else(|| {
+                self.open_album
+                    .as_ref()
+                    .map(|album| format!("Album: {}", album.title))
+            })
+            .or_else(|| {
+                self.open_artist
+                    .as_ref()
+                    .map(|artist| format!("Artist: {}", artist.name))
+            })
+    }
+
+    fn push_location(&mut self) {
+        self.back_stack.push(NavLocation {
+            view: self.view,
+            selected: self.selected,
+            search_query: self.search_query.clone(),
+            search_category: self.search_category,
+            search_editing: self.search_editing,
+        });
+    }
+
+    fn restore_location(&mut self) {
+        self.close_detail();
+        if let Some(location) = self.back_stack.pop() {
+            self.view = location.view;
+            self.selected = location.selected;
+            self.search_query = location.search_query;
+            self.search_category = location.search_category;
+            self.search_editing = location.search_editing;
+            if self.view == LibraryView::Search {
+                self.refresh_search();
+            }
+        } else {
+            self.view = LibraryView::Songs;
+            self.selected = 0;
+        }
+        self.selected = self.selected.min(self.library_len().saturating_sub(1));
     }
 
     fn go_back(&mut self) {
         self.confirm_delete = None;
-        if self.open_playlist.is_some() {
-            self.open_playlist = None;
-            self.open_tracks.clear();
-            self.selected = 0;
+        if self.detail_open() {
+            self.restore_location();
         } else if self.pending_add.is_some() {
             self.pending_add = None;
             if let Some(view) = self.picker_return.take() {
                 self.view = view;
             }
             self.selected = 0;
+        } else if !self.back_stack.is_empty() {
+            self.restore_location();
+        }
+    }
+
+    /// Append every track currently represented by the panel to the queue.
+    ///
+    /// Songs/Albums/Artists panels represent the whole library; an open detail
+    /// represents its own tracks; Search represents the active category's
+    /// matches. Duplicates (by path) are removed.
+    fn add_all_to_queue(&mut self) {
+        if self.picker_active() {
+            self.status = "Bulk add works in a library view".to_string();
+            return;
+        }
+
+        let tracks: Vec<Track> = if self.detail_open() {
+            self.open_tracks.clone()
+        } else {
+            match self.view {
+                LibraryView::Songs | LibraryView::Albums | LibraryView::Artists => {
+                    self.catalog.songs.clone()
+                }
+                LibraryView::Playlists => {
+                    self.status = "Open a playlist first (Enter)".to_string();
+                    return;
+                }
+                LibraryView::Search => self.search_all_tracks(),
+            }
+        };
+
+        let tracks = crate::models::dedupe_by_path(tracks);
+        if tracks.is_empty() {
+            self.status = "No songs to add".to_string();
+            return;
+        }
+        let count = tracks.len();
+        self.queue.append(tracks);
+        self.status = format!("Added {count} song(s) to queue");
+    }
+
+    /// All tracks matchable by the current search category.
+    fn search_all_tracks(&self) -> Vec<Track> {
+        match self.search_category {
+            SearchCategory::Songs => self.search_results.songs.clone(),
+            SearchCategory::Albums => self
+                .search_results
+                .albums
+                .iter()
+                .flat_map(|album| album.tracks.clone())
+                .collect(),
+            SearchCategory::Artists => self
+                .search_results
+                .artists
+                .iter()
+                .flat_map(|artist| artist.tracks.clone())
+                .collect(),
+            SearchCategory::Playlists => self
+                .search_results
+                .playlists
+                .iter()
+                .filter_map(|playlist| self.playlist_tracks(playlist.id))
+                .flatten()
+                .collect(),
         }
     }
 

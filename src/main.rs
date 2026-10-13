@@ -57,19 +57,21 @@ CONFIGURATION:
     spec: $XDG_CONFIG_HOME/rayap-musik/config.toml (default ~/.config/...).
 
 KEYS:
-    Up / Down       Move selection in the active panel
+    Up / Down       Move selection in the active panel (wraps around)
     Tab             Switch focus between Library and Queue
     1 / 2 / 3 / 4   Switch view: Songs / Albums / Artists / Playlists
-    /               Global search (type to filter, Esc to leave)
-    Enter           Play Now / open playlist (Playlists view)
+                    (inside Search: switch result category)
+    /               Global search (type to filter; / again to browse results)
+    Enter           Play song / open detail (Albums / Artists / Playlists)
     a               Add selection to the end of the queue
+    A               Add everything in the current panel to the queue
     N               Play Next: insert selection after the active track
     d               Remove the selected queue entry (Queue view)
     s               Toggle shuffle
     R               Cycle repeat: Off -> All -> One -> Off
     m               Toggle Play Mode (full screen)
     T               Cycle theme (rust-walnut/catppuccin/dracula/nord)
-    ?               Toggle this help
+    ?               Toggle this help (type to search keys)
     c               Create a new playlist
     e               Rename the selected playlist
     D               Duplicate the selected playlist
@@ -78,7 +80,7 @@ KEYS:
     I / E           Import / export an M3U playlist
     J / K           Move track down/up inside a playlist
     S               Sort the open playlist by artist/album/track
-    Esc / Backspace Back (leave a playlist, cancel a picker)
+    Esc / Backspace Back (leave a detail view, cancel a picker)
     Space           Play / Pause
     n               Next track
     p               Previous / restart (restart if played > 3s)

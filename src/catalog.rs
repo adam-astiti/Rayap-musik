@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::library::compare_tracks;
-use crate::models::{Playlist, Track};
+use crate::models::{Playlist, SearchCategory, Track};
 
 /// A collection of tracks grouped by album name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,13 +33,25 @@ pub struct Catalog {
     pub artists: Vec<Artist>,
 }
 
-/// A single global-search hit, tagged with its source type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SearchEntry {
-    Song(Track),
-    Album(Album),
-    Artist(Artist),
-    Playlist(Playlist),
+/// Results of a global search, split into the four result categories.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchResults {
+    pub songs: Vec<Track>,
+    pub albums: Vec<Album>,
+    pub artists: Vec<Artist>,
+    pub playlists: Vec<Playlist>,
+}
+
+impl SearchResults {
+    /// Number of results in a given category.
+    pub fn count(&self, category: SearchCategory) -> usize {
+        match category {
+            SearchCategory::Songs => self.songs.len(),
+            SearchCategory::Albums => self.albums.len(),
+            SearchCategory::Artists => self.artists.len(),
+            SearchCategory::Playlists => self.playlists.len(),
+        }
+    }
 }
 
 /// Build a deterministically sorted and grouped catalog from indexed tracks.
@@ -54,51 +66,72 @@ pub fn build_catalog(tracks: Vec<Track>) -> Catalog {
     }
 }
 
-/// Global case-insensitive substring search across songs, albums, artists, and
-/// playlists. Results are ordered by type (songs, albums, artists, playlists).
-pub fn search(catalog: &Catalog, playlists: &[Playlist], query: &str) -> Vec<SearchEntry> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Vec::new();
+/// Global, case-insensitive search across songs, albums, artists, and
+/// playlists, returning results grouped by category.
+///
+/// Matching is substring-based and multi-word: the query is split on
+/// whitespace and every term must match at least one field of an entity
+/// (e.g. `radiohead kid a` matches the album "Kid A" by Radiohead).
+pub fn search(catalog: &Catalog, playlists: &[Playlist], query: &str) -> SearchResults {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|term| term.to_lowercase())
+        .collect();
+    if terms.is_empty() {
+        return SearchResults::default();
     }
-    let query = query.to_lowercase();
+    let terms: Vec<&str> = terms.iter().map(String::as_str).collect();
 
-    let mut results = Vec::new();
+    let songs = catalog
+        .songs
+        .iter()
+        .filter(|song| {
+            let fields = [
+                song.title.as_str(),
+                song.artist.as_deref().unwrap_or(""),
+                song.album.as_deref().unwrap_or(""),
+            ];
+            matches_all_terms(&terms, &fields)
+        })
+        .cloned()
+        .collect();
 
-    for song in &catalog.songs {
-        let matches = contains_ci(&song.title, &query)
-            || song
-                .artist
-                .as_deref()
-                .is_some_and(|value| contains_ci(value, &query))
-            || song
-                .album
-                .as_deref()
-                .is_some_and(|value| contains_ci(value, &query));
-        if matches {
-            results.push(SearchEntry::Song(song.clone()));
-        }
+    let albums = catalog
+        .albums
+        .iter()
+        .filter(|album| {
+            let fields = [album.title.as_str(), album.artist_label.as_str()];
+            matches_all_terms(&terms, &fields)
+        })
+        .cloned()
+        .collect();
+
+    let artists = catalog
+        .artists
+        .iter()
+        .filter(|artist| matches_all_terms(&terms, &[artist.name.as_str()]))
+        .cloned()
+        .collect();
+
+    let playlists = playlists
+        .iter()
+        .filter(|playlist| matches_all_terms(&terms, &[playlist.name.as_str()]))
+        .cloned()
+        .collect();
+
+    SearchResults {
+        songs,
+        albums,
+        artists,
+        playlists,
     }
+}
 
-    for album in &catalog.albums {
-        if contains_ci(&album.title, &query) || contains_ci(&album.artist_label, &query) {
-            results.push(SearchEntry::Album(album.clone()));
-        }
-    }
-
-    for artist in &catalog.artists {
-        if contains_ci(&artist.name, &query) {
-            results.push(SearchEntry::Artist(artist.clone()));
-        }
-    }
-
-    for playlist in playlists {
-        if contains_ci(&playlist.name, &query) {
-            results.push(SearchEntry::Playlist(playlist.clone()));
-        }
-    }
-
-    results
+/// Every term must match at least one field.
+fn matches_all_terms(terms: &[&str], fields: &[&str]) -> bool {
+    terms
+        .iter()
+        .all(|term| fields.iter().any(|field| contains_ci(field, term)))
 }
 
 fn contains_ci(haystack: &str, needle: &str) -> bool {
@@ -176,7 +209,7 @@ fn group_artists(songs: &[Track]) -> Vec<Artist> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{build_catalog, search, SearchEntry};
+    use super::{build_catalog, search};
     use crate::models::{Playlist, Track};
 
     fn track(title: &str, artist: &str, album: &str, number: Option<u32>) -> Track {
@@ -190,16 +223,8 @@ mod tests {
         }
     }
 
-    fn names(entries: &[SearchEntry]) -> Vec<String> {
-        entries
-            .iter()
-            .map(|entry| match entry {
-                SearchEntry::Song(track) => format!("song:{track}", track = track.title),
-                SearchEntry::Album(album) => format!("album:{}", album.title),
-                SearchEntry::Artist(artist) => format!("artist:{}", artist.name),
-                SearchEntry::Playlist(playlist) => format!("playlist:{}", playlist.name),
-            })
-            .collect()
+    fn song_titles(results: &super::SearchResults) -> Vec<String> {
+        results.songs.iter().map(|t| t.title.clone()).collect()
     }
 
     #[test]
@@ -251,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn search_is_case_insensitive_and_typed() {
+    fn search_is_case_insensitive_and_categorized() {
         let catalog = build_catalog(vec![
             track("Hello", "World", "Greetings", Some(1)),
             track("Other", "Worldly", "Stuff", Some(1)),
@@ -262,22 +287,34 @@ mod tests {
         }];
 
         let results = search(&catalog, &playlists, "WORLD");
-        let names = names(&results);
 
-        assert!(
-            names.contains(&"song:Hello".to_string()),
-            "song title match"
-        );
-        assert!(names.contains(&"artist:World".to_string()), "artist match");
-        assert!(
-            names.contains(&"playlist:World Tour".to_string()),
-            "playlist match"
-        );
+        assert_eq!(song_titles(&results), vec!["Hello", "Other"]);
+        assert_eq!(results.artists.len(), 2, "both World and Worldly match");
+        assert_eq!(results.playlists.len(), 1);
+        assert_eq!(results.playlists[0].name, "World Tour");
+    }
+
+    #[test]
+    fn search_matches_multi_word_across_fields() {
+        let catalog = build_catalog(vec![track("01", "Radiohead", "Kid A", Some(1))]);
+        let results = search(&catalog, &[], "radiohead kid a");
+        assert_eq!(results.albums.len(), 1);
+        assert_eq!(results.albums[0].title, "Kid A");
+    }
+
+    #[test]
+    fn search_requires_all_terms() {
+        let catalog = build_catalog(vec![track("01", "Radiohead", "Kid A", Some(1))]);
+        assert!(search(&catalog, &[], "radiohead moon").albums.is_empty());
     }
 
     #[test]
     fn empty_search_returns_nothing() {
         let catalog = build_catalog(vec![track("a", "b", "c", Some(1))]);
-        assert!(search(&catalog, &[], "   ").is_empty());
+        let results = search(&catalog, &[], "   ");
+        assert!(results.songs.is_empty());
+        assert!(results.albums.is_empty());
+        assert!(results.artists.is_empty());
+        assert!(results.playlists.is_empty());
     }
 }

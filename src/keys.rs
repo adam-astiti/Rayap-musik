@@ -66,6 +66,7 @@ pub static BINDINGS: &[Binding] = &[
     Binding { label: "3",      desc: "Artists view",               action: Action::SwitchView(LibraryView::Artists),   contexts: GLOBAL, terms: &["artists"],   keys: &[KeyCode::Char('3')] },
     Binding { label: "4",      desc: "Playlists view",             action: Action::SwitchView(LibraryView::Playlists), contexts: GLOBAL, terms: &["playlists"], keys: &[KeyCode::Char('4')] },
     Binding { label: "a",      desc: "Add to queue",               action: Action::AddToQueue,     contexts: &[C::Songs, C::Albums, C::Artists, C::Playlists, C::OpenPlaylist, C::Search], terms: &["queue", "add"],   keys: &[KeyCode::Char('a')] },
+    Binding { label: "A",      desc: "Add all to queue",           action: Action::AddAllToQueue,  contexts: &[C::Songs, C::Albums, C::Artists, C::OpenPlaylist, C::Search], terms: &["queue", "add", "all", "bulk"], keys: &[KeyCode::Char('A')] },
     Binding { label: "N",      desc: "Play Next",                  action: Action::PlayNext,       contexts: &[C::Songs, C::Albums, C::Artists, C::Playlists, C::OpenPlaylist, C::Search], terms: &["next", "insert"], keys: &[KeyCode::Char('N')] },
     Binding { label: "d",      desc: "Remove queue entry",         action: Action::RemoveFromQueue, contexts: &[C::Queue],            terms: &["remove", "delete", "queue"], keys: &[KeyCode::Char('d')] },
     Binding { label: "s",      desc: "Toggle shuffle",             action: Action::ToggleShuffle,  contexts: &[C::Queue],            terms: &["shuffle"],                 keys: &[KeyCode::Char('s')] },
@@ -86,9 +87,14 @@ pub static BINDINGS: &[Binding] = &[
 /// ignored here: dispatch keeps historical global behaviour, while `contexts`
 /// drives which bindings the contextual helper and Help page surface.
 pub fn lookup(key: &KeyEvent) -> Option<Action> {
+    lookup_code(&key.code)
+}
+
+/// Resolve a key code to the action it triggers.
+pub fn lookup_code(code: &KeyCode) -> Option<Action> {
     BINDINGS
         .iter()
-        .find(|binding| binding.keys.contains(&key.code))
+        .find(|binding| binding.keys.contains(code))
         .map(|binding| binding.action)
 }
 

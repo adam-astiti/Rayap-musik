@@ -7,9 +7,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::catalog::SearchEntry;
 use crate::keys;
-use crate::models::{Focus, LibraryView, PlaybackState};
+use crate::models::{Focus, LibraryView, PlaybackState, SearchCategory};
 use crate::theme::Theme;
 
 /// Minimum usable terminal size before we show a warning instead of the UI.
@@ -19,25 +18,10 @@ const MIN_HEIGHT: u16 = 20;
 /// Number of bars in the equalizer.
 const EQ_BARS: usize = 7;
 
-/// Animated ASCII termite mascot. The antennae and eyes change with `frame`.
-fn mascot(frame: usize) -> Vec<String> {
-    let (left, right) = if frame % 2 == 0 {
-        (r"    \  /", r"     \/ ")
-    } else {
-        (r"    /  \", r"     /\ ")
-    };
-    let eyes = if frame % 4 == 3 {
-        r"   ( - - )"
-    } else {
-        r"   ( o o )"
-    };
-    vec![
-        left.to_string(),
-        right.to_string(),
-        eyes.to_string(),
-        r"    (___)".to_string(),
-        r"   //  \\".to_string(),
-    ]
+/// A single-line "listening to music" face. The eyes blink with `frame`.
+fn mascot(frame: usize) -> String {
+    let eyes = if frame % 4 == 3 { "-_-" } else { "◕_◕" };
+    format!("--[ d({eyes})b ]--")
 }
 
 /// Per-bar equalizer levels, animated from the playback position.
@@ -116,6 +100,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             Constraint::Length(3),
             Constraint::Min(5),
             Constraint::Length(3),
+            Constraint::Length(3),
         ])
         .split(area);
 
@@ -129,6 +114,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_library(frame, middle[0], app);
     draw_queue(frame, middle[1], app);
     draw_status(frame, rows[3], app);
+    draw_keys(frame, rows[4], app);
 }
 
 fn draw_too_small(frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -188,7 +174,7 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
         ],
         None => vec![
             Line::from(Span::styled(
-                "No track playing",
+                "No track playing  (._.)",
                 Style::default()
                     .fg(theme.foreground)
                     .add_modifier(Modifier::BOLD),
@@ -226,17 +212,15 @@ fn draw_progress(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Style::default().fg(theme.foreground),
         ),
+        Span::styled("   ", Style::default()),
+        Span::styled(progress_bar(ratio, 24), Style::default().fg(theme.accent)),
         Span::styled(
-            format!("    Volume: {}%    [", app.volume),
+            format!("  {}% {}", app.volume, volume_bar(app.volume)),
             Style::default().fg(theme.muted),
         ),
         Span::styled(
-            progress_bar(ratio, 20),
-            Style::default().fg(theme.accent_alt),
-        ),
-        Span::styled(
             format!(
-                "]    Shuffle:{}  Repeat:{}",
+                "  Shuffle:{} ⇄   Repeat:{} ↻",
                 if app.queue.is_shuffled() { "on" } else { "off" },
                 app.repeat.label()
             ),
@@ -249,10 +233,34 @@ fn draw_progress(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// A smooth progress bar using block characters with a fractional tip.
 fn progress_bar(ratio: f64, width: usize) -> String {
-    let filled = (ratio.clamp(0.0, 1.0) * width as f64).round() as usize;
-    let empty = width.saturating_sub(filled);
-    format!("{}{}", "#".repeat(filled), "-".repeat(empty))
+    if width == 0 {
+        return String::new();
+    }
+    let scaled = ratio.clamp(0.0, 1.0) * width as f64;
+    let full = scaled.floor() as usize;
+    let frac = scaled - full as f64;
+    const EIGHTHS: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+
+    let mut out = String::with_capacity(width);
+    for index in 0..width {
+        match index.cmp(&full) {
+            std::cmp::Ordering::Less => out.push('█'),
+            std::cmp::Ordering::Equal => {
+                let tip = ((frac * 8.0).round() as usize).min(7);
+                out.push(if tip == 0 { '░' } else { EIGHTHS[tip] });
+            }
+            std::cmp::Ordering::Greater => out.push('░'),
+        }
+    }
+    out
+}
+
+/// A small ten-segment volume meter.
+fn volume_bar(percent: u8) -> String {
+    let segments = (percent as usize * 10).div_ceil(100);
+    format!("{}{}", "▮".repeat(segments), "▯".repeat(10 - segments))
 }
 
 fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
@@ -263,10 +271,14 @@ fn draw_library(frame: &mut Frame, area: Rect, app: &App) {
 
     let rows = library_rows(app);
     if rows.is_empty() {
-        let message = if app.view == LibraryView::Search && app.search_query.is_empty() {
-            "Type to search".to_string()
+        let message = if app.view == LibraryView::Search {
+            if app.search_query.is_empty() {
+                "Search your library…  (^_^)".to_string()
+            } else {
+                "No results found.  (._.)".to_string()
+            }
         } else {
-            "(empty)".to_string()
+            r"(empty) ¯\_(ツ)_/¯".to_string()
         };
         frame.render_widget(
             Paragraph::new(message)
@@ -314,11 +326,15 @@ fn library_title(app: &App, focused: bool) -> String {
     if app.picker_active() {
         return format!("{marker} Add to playlist");
     }
-    if let Some(playlist) = &app.open_playlist {
-        return format!("{marker} Playlist: {}", playlist.name);
+    if let Some(label) = app.detail_label() {
+        return format!("{marker} {label}");
     }
     match app.view {
-        LibraryView::Search => format!("{marker} Search: \"{}\"", app.search_query),
+        LibraryView::Search => format!(
+            "{marker} Search [{}]: \"{}\"",
+            app.search_category.label(),
+            app.search_query
+        ),
         view => format!("{marker} {}", view.label()),
     }
 }
@@ -331,7 +347,7 @@ fn library_rows(app: &App) -> Vec<String> {
             .map(|playlist| playlist.name.clone())
             .collect();
     }
-    if app.open_playlist.is_some() {
+    if app.detail_open() {
         return app
             .open_tracks
             .iter()
@@ -362,16 +378,36 @@ fn library_rows(app: &App) -> Vec<String> {
             .iter()
             .map(|playlist| playlist.name.clone())
             .collect(),
-        LibraryView::Search => app.search_results.iter().map(search_label).collect(),
+        LibraryView::Search => search_rows(app),
     }
 }
 
-fn search_label(entry: &SearchEntry) -> String {
-    match entry {
-        SearchEntry::Song(track) => format!("[Song] {} — {}", track.artist_label(), track.title),
-        SearchEntry::Album(album) => format!("[Album] {} — {}", album.title, album.artist_label),
-        SearchEntry::Artist(artist) => format!("[Artist] {}", artist.name),
-        SearchEntry::Playlist(playlist) => format!("[Playlist] {}", playlist.name),
+fn search_rows(app: &App) -> Vec<String> {
+    match app.search_category {
+        SearchCategory::Songs => app
+            .search_results
+            .songs
+            .iter()
+            .map(|track| format!("{} — {}", track.artist_label(), track.title))
+            .collect(),
+        SearchCategory::Albums => app
+            .search_results
+            .albums
+            .iter()
+            .map(|album| format!("{} — {}", album.title, album.artist_label))
+            .collect(),
+        SearchCategory::Artists => app
+            .search_results
+            .artists
+            .iter()
+            .map(|artist| artist.name.clone())
+            .collect(),
+        SearchCategory::Playlists => app
+            .search_results
+            .playlists
+            .iter()
+            .map(|playlist| playlist.name.clone())
+            .collect(),
     }
 }
 
@@ -441,30 +477,55 @@ fn draw_queue(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
-    let helper = helper_line(app);
     let first_line = app.prompt_display().unwrap_or_else(|| app.status.clone());
-    let text = vec![
-        Line::from(Span::styled(
-            first_line,
-            Style::default().fg(theme.accent_alt),
-        )),
-        Line::from(Span::styled(helper, Style::default().fg(theme.muted))),
-    ];
+    let face = if app.playback == PlaybackState::Playing {
+        "(^_^)"
+    } else if app.playback == PlaybackState::Paused {
+        "(-_-)"
+    } else {
+        "(._.)"
+    };
+    let text = vec![Line::from(vec![
+        Span::styled(first_line, Style::default().fg(theme.accent_alt)),
+        Span::styled(format!("   {face}"), Style::default().fg(theme.muted)),
+    ])];
     frame.render_widget(
-        Paragraph::new(text).block(panel_block("Status / Help", false, theme)),
+        Paragraph::new(text).block(panel_block("Status", false, theme)),
         area,
     );
 }
 
-/// A compact, context-aware keybinding helper from the shared binding table.
-fn helper_line(app: &App) -> String {
-    let mut parts: Vec<String> = keys::for_context(app.context())
-        .into_iter()
-        .take(5)
-        .map(|binding| format!("{} {}", binding.label, binding.desc))
-        .collect();
-    parts.push("? help".to_string());
-    parts.join("   ")
+/// A compact, context-aware keybinding helper panel from the shared table.
+fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
+    let theme = &app.theme;
+    let mut spans: Vec<Span> = Vec::new();
+    let bindings = keys::for_context(app.context());
+    for (index, binding) in bindings.into_iter().take(5).enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("   ", Style::default()));
+        }
+        spans.push(Span::styled(
+            format!("{} ", binding.label),
+            Style::default()
+                .fg(theme.accent_alt)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            binding.desc.to_string(),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    spans.push(Span::styled(
+        "   ? help",
+        Style::default().fg(theme.accent_alt),
+    ));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .block(panel_block("Keys", false, theme))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn draw_play_mode(frame: &mut Frame, area: Rect, app: &App) {
@@ -510,17 +571,22 @@ fn draw_play_mode(frame: &mut Frame, area: Rect, app: &App) {
 
     let show_mascot = inner.width >= 24;
     let mut art_lines: Vec<Line> = if show_mascot {
-        mascot(anim_frame(app))
-            .into_iter()
-            .map(|line| Line::from(Span::styled(line, Style::default().fg(theme.accent_alt))))
-            .collect()
+        vec![Line::from(Span::styled(
+            mascot(anim_frame(app)),
+            Style::default()
+                .fg(theme.accent_alt)
+                .add_modifier(Modifier::BOLD),
+        ))]
     } else {
         vec![Line::from(Span::styled(
-            "(rayap musik)",
+            "d(o_o)b",
             Style::default().fg(theme.muted),
         ))]
     };
-    art_lines.push(Line::from(""));
+    art_lines.push(Line::from(Span::styled(
+        "♪ ♫ ♪",
+        Style::default().fg(theme.accent),
+    )));
     for row in equalizer_rows(app, 5) {
         art_lines.push(Line::from(Span::styled(
             row,
@@ -543,17 +609,18 @@ fn draw_play_mode(frame: &mut Frame, area: Rect, app: &App) {
     let status_lines = vec![
         Line::from(Span::styled(
             format!(
-                "{} / {}    Volume: {}%    [{}]",
+                "{} / {}   {}   {}% {}",
                 format_duration(position),
                 format_duration(duration),
+                progress_bar(ratio, 24),
                 app.volume,
-                progress_bar(ratio, 24)
+                volume_bar(app.volume)
             ),
             Style::default().fg(theme.foreground),
         )),
         Line::from(Span::styled(
             format!(
-                "{}    Shuffle:{}    Repeat:{}",
+                "{}    Shuffle:{} ⇄    Repeat:{} ↻",
                 app.playback.label(),
                 if app.queue.is_shuffled() { "on" } else { "off" },
                 app.repeat.label()
@@ -576,7 +643,7 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent))
-        .title("Help");
+        .title("Help  (^_^)");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

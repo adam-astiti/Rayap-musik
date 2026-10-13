@@ -101,12 +101,13 @@ without discarding the rest.
 
 | Key | Action |
 |---|---|
-| `↑` / `↓` | Move selection |
+| `↑` / `↓` | Move selection (wraps around) |
 | `Tab` | Switch focus (Library / Queue) |
-| `1` / `2` / `3` / `4` | Songs / Albums / Artists / Playlists |
-| `/` | Global search (type to filter, `Esc` to leave) |
-| `Enter` | Play Now / open a playlist |
+| `1` / `2` / `3` / `4` | Songs / Albums / Artists / Playlists (category inside Search) |
+| `/` | Global search (type to filter, `1`-`4` category, `/` again to browse results, `Esc` to leave) |
+| `Enter` | Play song / open detail (Albums / Artists / Playlists) |
 | `a` | Add selection to the end of the queue |
+| `A` | Add everything in the current panel to the queue |
 | `N` | Play Next (insert after the active track) |
 | `d` | Remove the selected queue entry (Queue view) |
 | `s` | Toggle shuffle |
@@ -118,7 +119,7 @@ without discarding the rest.
 | `P` | Add the selection to a playlist |
 | `I` / `E` | Import / export an M3U playlist |
 | `J` / `K` / `S` | Move track down / up / sort (inside a playlist) |
-| `Esc` / `Backspace` | Back (leave a playlist, cancel a picker) |
+| `Esc` / `Backspace` | Back (leave a detail view, cancel a picker) |
 | `Space` | Play / Pause |
 | `n` / `p` | Next / previous track (previous restarts if played > 3s) |
 | `+` / `-` | Volume up / down (5% step) |

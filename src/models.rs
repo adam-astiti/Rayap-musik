@@ -13,8 +13,12 @@ pub enum InputMode {
     /// Normal navigation and shortcuts.
     #[default]
     Normal,
-    /// Editing text (search query or a prompt).
-    Text,
+    /// Editing the global search query.
+    SearchEdit,
+    /// Navigating the search results (query retained but frozen).
+    SearchResults,
+    /// Editing a prompt (playlist name, M3U path).
+    Prompt,
     /// Searching the Help page.
     Help,
 }
@@ -33,6 +37,18 @@ pub fn wrap_selection(current: usize, delta: i32, len: usize) -> usize {
         next += len;
     }
     next as usize
+}
+
+/// Remove duplicate tracks (by file path), keeping the first occurrence.
+pub fn dedupe_by_path(tracks: Vec<Track>) -> Vec<Track> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        if seen.insert(track.path.clone()) {
+            result.push(track);
+        }
+    }
+    result
 }
 
 /// Which panel currently owns keyboard focus.
@@ -390,11 +406,14 @@ pub enum Action {
     Rescan,
     SwitchView(LibraryView),
     StartSearch,
+    SwitchSearchCategory(SearchCategory),
+    ToggleSearchFocus,
     TypeChar(char),
     DeleteChar,
     Cancel,
     PlayNext,
     AddToQueue,
+    AddAllToQueue,
     RemoveFromQueue,
     ToggleShuffle,
     CycleRepeat,
@@ -413,6 +432,27 @@ pub enum Action {
     Sort,
     Quit,
     Resize,
+}
+
+/// The active result category within the Search interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchCategory {
+    #[default]
+    Songs,
+    Albums,
+    Artists,
+    Playlists,
+}
+
+impl SearchCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            SearchCategory::Songs => "Songs",
+            SearchCategory::Albums => "Albums",
+            SearchCategory::Artists => "Artists",
+            SearchCategory::Playlists => "Playlists",
+        }
+    }
 }
 
 /// Which section of the library is currently shown.
@@ -440,8 +480,28 @@ impl LibraryView {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_selection;
+    use super::{dedupe_by_path, wrap_selection};
+    use crate::models::Track;
+    use std::path::PathBuf;
 
+    fn track(path: &str) -> Track {
+        Track {
+            path: PathBuf::from(path),
+            title: path.to_string(),
+            artist: None,
+            album: None,
+            track_number: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn dedupe_keeps_first_occurrence() {
+        let tracks = vec![track("a.mp3"), track("b.mp3"), track("a.mp3")];
+        let result = dedupe_by_path(tracks);
+        let paths: Vec<String> = result.iter().map(|t| t.title.clone()).collect();
+        assert_eq!(paths, vec!["a.mp3", "b.mp3"]);
+    }
     #[test]
     fn wrap_handles_empty_and_single() {
         assert_eq!(wrap_selection(0, -1, 0), 0);
