@@ -49,8 +49,8 @@ OPTIONS:
     -V, --version        Print version and exit
 
 SUPPORTED FORMATS:
-    .mp3 .flac .wav .ogg .oga .m4a .mp4 .aac
-    (Opus is not decoded by the current stack and is a known gap)
+    .mp3 .flac .wav .ogg .oga .opus .m4a .mp4 .aac
+    (Opus is indexed but not decoded by the current stack — a known gap)
 
 CONFIGURATION:
     Settings are stored in a commented TOML file. Its location follows the XDG

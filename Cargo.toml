@@ -2,9 +2,14 @@
 name = "rayap-musik"
 version = "0.2.0"
 edition = "2021"
-description = "Local-first terminal music player for Linux"
+description = "Local-first terminal music library manager and player for Linux"
 license = "MIT"
-repository = ""
+repository = "https://github.com/adam-astiti/Rayap-musik"
+homepage = "https://github.com/adam-astiti/Rayap-musik"
+readme = "README.md"
+rust-version = "1.85"
+keywords = ["music", "tui", "audio", "terminal", "player"]
+categories = ["command-line-utilities", "multimedia::audio"]
 
 [[bin]]
 name = "rayap-musik"

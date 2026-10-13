@@ -1,0 +1,85 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build x86_64 (debian:11, glibc 2.31)
+    runs-on: ubuntu-latest
+    container: debian:11
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential binutils pkg-config libasound2-dev \
+            ca-certificates curl git dpkg-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.85
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain 1.85.1
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Verify glibc requirement
+        env:
+          GLIBC_MAX: "2.31"
+        run: |
+          set -euo pipefail
+          BIN=target/release/rayap-musik
+          MAX="$(objdump -T "$BIN" \
+            | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+            | sort -uV | tail -n1)"
+          echo "Binary requires up to ${MAX}"
+          HIGHEST="$(printf '%s\n%s\n' "GLIBC_${GLIBC_MAX}" "$MAX" | sort -V | tail -n1)"
+          if [ "$HIGHEST" != "GLIBC_${GLIBC_MAX}" ]; then
+            echo "ERROR: ${MAX} exceeds the glibc ${GLIBC_MAX} target" >&2
+            exit 1
+          fi
+          echo "OK: glibc requirement is within ${GLIBC_MAX}"
+
+      - name: Package artifacts
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          if [ "v${VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${VERSION}" >&2
+            exit 1
+          fi
+
+          mkdir -p out
+          STAGE="$(mktemp -d)"
+          NAME="rayap-musik_${VERSION}"
+          mkdir -p "$STAGE/$NAME"
+          install -m755 target/release/rayap-musik "$STAGE/$NAME/rayap-musik"
+          install -m644 README.md LICENSE "$STAGE/$NAME/"
+          tar -czf "out/${NAME}_x86_64.tar.gz" -C "$STAGE" "$NAME"
+
+          packaging/build-deb.sh
+          cp dist/*.deb out/
+
+          ( cd out && sha256sum ./* > SHA256SUMS )
+          ls -l out
+
+      - name: Publish draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: out/*
