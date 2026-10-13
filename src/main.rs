@@ -236,7 +236,7 @@ fn run(terminal: &mut Terminal<Backend>, app: &mut App) -> io::Result<()> {
         if event::poll(EVENT_POLL_INTERVAL)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if let Some(action) = input::map_key(key, app.text_input_active()) {
+                    if let Some(action) = input::map_key(key, app.input_mode()) {
                         app.handle_action(action);
                     }
                 }

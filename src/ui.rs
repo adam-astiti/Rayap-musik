@@ -8,52 +8,82 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::catalog::SearchEntry;
-use crate::models::{Focus, LibraryView};
+use crate::keys;
+use crate::models::{Focus, LibraryView, PlaybackState};
 use crate::theme::Theme;
 
 /// Minimum usable terminal size before we show a warning instead of the UI.
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 20;
 
-/// ASCII termite mascot. Kept compact so it fits in most terminals.
-const MASCOT: &[&str] = &[
-    "   \\   /   ",
-    "    \\ /    ",
-    "    / \\    ",
-    "   / O O \\ ",
-    "   |  _  | ",
-    "   \\_/ \\_/ ",
-    "    _|||_   ",
-];
+/// Number of bars in the equalizer.
+const EQ_BARS: usize = 7;
 
-const HELP_LINES: &[(&str, &str)] = &[
-    ("Up / Down", "Move selection"),
-    ("Tab", "Switch focus (Library / Queue)"),
-    ("1 / 2 / 3 / 4", "Songs / Albums / Artists / Playlists"),
-    ("/", "Search (Esc to leave)"),
-    ("Enter", "Play Now / open playlist"),
-    ("a", "Add selection to queue"),
-    ("N", "Play Next (insert after active)"),
-    ("d", "Remove queue entry (Queue view)"),
-    ("s", "Toggle shuffle"),
-    ("R", "Cycle repeat (Off/All/One)"),
-    ("m", "Toggle Play Mode"),
-    ("T", "Cycle theme"),
-    ("?", "Toggle this help"),
-    (
-        "c / e / D / x",
-        "Create / rename / duplicate / delete playlist",
-    ),
-    ("P", "Add selection to a playlist"),
-    ("I / E", "Import / export M3U"),
-    ("J / K / S", "Move track down / up / sort (in playlist)"),
-    ("Esc / Backspace", "Back (leave playlist, cancel picker)"),
-    ("Space", "Play / Pause"),
-    ("n / p", "Next / previous track"),
-    ("+ / -", "Volume up / down"),
-    ("r", "Rescan library"),
-    ("q", "Quit"),
-];
+/// Animated ASCII termite mascot. The antennae and eyes change with `frame`.
+fn mascot(frame: usize) -> Vec<String> {
+    let (left, right) = if frame % 2 == 0 {
+        (r"    \  /", r"     \/ ")
+    } else {
+        (r"    /  \", r"     /\ ")
+    };
+    let eyes = if frame % 4 == 3 {
+        r"   ( - - )"
+    } else {
+        r"   ( o o )"
+    };
+    vec![
+        left.to_string(),
+        right.to_string(),
+        eyes.to_string(),
+        r"    (___)".to_string(),
+        r"   //  \\".to_string(),
+    ]
+}
+
+/// Per-bar equalizer levels, animated from the playback position.
+fn eq_levels(app: &App, max: usize) -> Vec<usize> {
+    let t = app.position().map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    (0..EQ_BARS)
+        .map(|i| match app.playback {
+            PlaybackState::Playing => {
+                let v = (t * 2.2 + i as f64 * 0.85).sin() * 0.5 + 0.5;
+                (v * max as f64).round() as usize
+            }
+            PlaybackState::Paused => 1,
+            PlaybackState::Stopped => 0,
+        })
+        .collect()
+}
+
+/// A single-line equalizer using block characters.
+fn equalizer_line(app: &App) -> String {
+    const BLOCKS: [char; 8] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '█'];
+    eq_levels(app, 7)
+        .iter()
+        .map(|&level| BLOCKS[level.min(7)])
+        .collect()
+}
+
+/// A taller equalizer rendered as vertical bars, one line per row.
+fn equalizer_rows(app: &App, height: usize) -> Vec<String> {
+    let levels = eq_levels(app, height);
+    (1..=height)
+        .rev()
+        .map(|row| {
+            let mut line = String::new();
+            for &level in &levels {
+                line.push(if level >= row { '█' } else { ' ' });
+                line.push(' ');
+            }
+            line
+        })
+        .collect()
+}
+
+/// Animation frame derived from playback position (frozen while paused).
+fn anim_frame(app: &App) -> usize {
+    app.position().map(|d| d.as_millis() / 300).unwrap_or(0) as usize
+}
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -70,7 +100,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 
     if app.show_help {
-        draw_help(frame, area, theme);
+        draw_help(frame, area, app);
         return;
     }
 
@@ -82,7 +112,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Length(3),
             Constraint::Min(5),
             Constraint::Length(3),
@@ -147,14 +177,14 @@ fn draw_now_playing(frame: &mut Frame, area: Rect, app: &App) {
                 format!("{}  |  {}", track.artist_label(), track.album_label()),
                 Style::default().fg(theme.accent_alt),
             )),
-            Line::from(Span::styled(
-                format!(
-                    "Duration: {}   ({})",
-                    format_duration(track.duration),
-                    app.playback.label()
+            Line::from(vec![
+                Span::styled("♪ ", Style::default().fg(theme.accent_alt)),
+                Span::styled(equalizer_line(app), Style::default().fg(theme.playing)),
+                Span::styled(
+                    format!("   ({})", app.playback.label()),
+                    Style::default().fg(theme.muted),
                 ),
-                Style::default().fg(theme.muted),
-            )),
+            ]),
         ],
         None => vec![
             Line::from(Span::styled(
@@ -411,19 +441,30 @@ fn draw_queue(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
-    let help = "1-4 view  / search  Enter play  a add  N next  s shuffle  R repeat  c new  e rename  D dup  x del  P add-to  I/E m3u  ? help";
+    let helper = helper_line(app);
     let first_line = app.prompt_display().unwrap_or_else(|| app.status.clone());
     let text = vec![
         Line::from(Span::styled(
             first_line,
             Style::default().fg(theme.accent_alt),
         )),
-        Line::from(Span::styled(help, Style::default().fg(theme.muted))),
+        Line::from(Span::styled(helper, Style::default().fg(theme.muted))),
     ];
     frame.render_widget(
         Paragraph::new(text).block(panel_block("Status / Help", false, theme)),
         area,
     );
+}
+
+/// A compact, context-aware keybinding helper from the shared binding table.
+fn helper_line(app: &App) -> String {
+    let mut parts: Vec<String> = keys::for_context(app.context())
+        .into_iter()
+        .take(5)
+        .map(|binding| format!("{} {}", binding.label, binding.desc))
+        .collect();
+    parts.push("? help".to_string());
+    parts.join("   ")
 }
 
 fn draw_play_mode(frame: &mut Frame, area: Rect, app: &App) {
@@ -438,36 +479,11 @@ fn draw_play_mode(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(MASCOT.len() as u16 + 1),
             Constraint::Length(3),
+            Constraint::Min(8),
             Constraint::Length(4),
-            Constraint::Length(4),
-            Constraint::Min(1),
         ])
         .split(inner);
-
-    let show_mascot = inner.width >= 24;
-
-    let mascot_lines: Vec<Line> = if show_mascot {
-        MASCOT
-            .iter()
-            .map(|line| {
-                Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(theme.accent_alt),
-                ))
-            })
-            .collect()
-    } else {
-        vec![Line::from(Span::styled(
-            "(rayap musik)",
-            Style::default().fg(theme.muted),
-        ))]
-    };
-    frame.render_widget(
-        Paragraph::new(mascot_lines).alignment(Alignment::Center),
-        chunks[0],
-    );
 
     let info_lines: Vec<Line> = match app.current_track() {
         Some(track) => vec![
@@ -489,10 +505,32 @@ fn draw_play_mode(frame: &mut Frame, area: Rect, app: &App) {
     };
     frame.render_widget(
         Paragraph::new(info_lines).alignment(Alignment::Center),
-        chunks[1],
+        chunks[0],
     );
 
-    draw_artwork_box(frame, chunks[2], app);
+    let show_mascot = inner.width >= 24;
+    let mut art_lines: Vec<Line> = if show_mascot {
+        mascot(anim_frame(app))
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(theme.accent_alt))))
+            .collect()
+    } else {
+        vec![Line::from(Span::styled(
+            "(rayap musik)",
+            Style::default().fg(theme.muted),
+        ))]
+    };
+    art_lines.push(Line::from(""));
+    for row in equalizer_rows(app, 5) {
+        art_lines.push(Line::from(Span::styled(
+            row,
+            Style::default().fg(theme.playing),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(art_lines).alignment(Alignment::Center),
+        chunks[1],
+    );
 
     let position = app.position();
     let duration = app.duration();
@@ -529,97 +567,74 @@ fn draw_play_mode(frame: &mut Frame, area: Rect, app: &App) {
     ];
     frame.render_widget(
         Paragraph::new(status_lines).alignment(Alignment::Center),
-        chunks[3],
+        chunks[2],
     );
 }
 
-fn draw_artwork_box(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
-    let centered = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(30),
-            Constraint::Percentage(40),
-            Constraint::Percentage(30),
-        ])
-        .split(area)[1];
-
-    let initial = app
-        .current_track()
-        .map(|track| {
-            track
-                .album_label()
-                .chars()
-                .next()
-                .map(|c| c.to_uppercase().collect::<String>())
-                .unwrap_or_else(|| "?".to_string())
-        })
-        .unwrap_or_else(|| "?".to_string());
-
-    let label = app
-        .artwork
-        .as_ref()
-        .map(artwork_label)
-        .unwrap_or_else(|| "Rayap Musik".to_string());
-
-    let lines = vec![
-        Line::from(Span::styled(
-            initial.clone(),
-            Style::default()
-                .fg(theme.highlight_fg)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(label, Style::default().fg(theme.highlight_fg))),
-    ];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent))
-        .style(Style::default().bg(theme.highlight_bg));
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .block(block),
-        centered,
-    );
-}
-
-fn artwork_label(artwork: &crate::artwork::Artwork) -> String {
-    artwork.label()
-}
-
-fn draw_help(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        "Rayap Musik — keys",
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    ))];
-    lines.push(Line::from(""));
-
-    for (key, desc) in HELP_LINES {
-        lines.push(Line::from(Span::styled(
-            format!("{:<20} {desc}", key),
-            Style::default().fg(theme.foreground),
-        )));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Press ? to close",
-        Style::default().fg(theme.muted),
-    )));
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent))
         .title("Help");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let search_text = if app.help_query.is_empty() {
+        "Type to search keys…".to_string()
+    } else {
+        format!("Search: {}\u{2588}", app.help_query)
+    };
+    frame.render_widget(
+        Paragraph::new(search_text)
+            .style(Style::default().fg(theme.accent_alt))
+            .block(Block::default().borders(Borders::BOTTOM)),
+        chunks[0],
+    );
+
+    let entries = app.help_entries();
+    if entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matching keys.").style(Style::default().fg(theme.muted)),
+            chunks[1],
+        );
+    } else {
+        let inner_height = chunks[1].height.saturating_sub(2) as usize;
+        let offset = scroll_offset(app.help_selected, inner_height, entries.len());
+        let lines: Vec<Line> = entries
+            .iter()
+            .enumerate()
+            .map(|(index, binding)| {
+                let selected = index == app.help_selected;
+                let style = if selected {
+                    Style::default()
+                        .bg(theme.highlight_bg)
+                        .fg(theme.highlight_fg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.foreground)
+                };
+                Line::from(format!("{:<20} {}", binding.label, binding.desc)).style(style)
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), chunks[1]);
+    }
 
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .style(Style::default().fg(theme.foreground)),
-        area,
+        Paragraph::new(Span::styled(
+            "Type to search   Esc: clear/close   ?: close",
+            Style::default().fg(theme.muted),
+        )),
+        chunks[2],
     );
 }
 

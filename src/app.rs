@@ -3,15 +3,15 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::artwork::{self, Artwork};
 use crate::catalog::{self, Catalog};
 use crate::db::Db;
 use crate::indexer::{IndexEvent, Indexer};
+use crate::keys::{self, Context};
 use crate::library;
 use crate::m3u;
 use crate::models::{
-    previous_action, Action, Focus, LibraryView, PlaybackState, Playlist, PreviousAction, Queue,
-    RepeatMode, Track,
+    previous_action, wrap_selection, Action, Focus, InputMode, LibraryView, PlaybackState,
+    Playlist, PreviousAction, Queue, RepeatMode, Track,
 };
 use crate::player::Player;
 use crate::theme::{self, Theme};
@@ -76,14 +76,13 @@ pub struct App {
     pub play_mode: bool,
     pub show_help: bool,
     pub theme: Theme,
-    /// Artwork for the current track, resolved once per track.
-    pub artwork: Option<Artwork>,
     pub should_quit: bool,
     pub status: String,
+    pub help_query: String,
+    pub help_selected: usize,
     player: Option<Player>,
     db: Option<Db>,
     indexer: Option<Indexer>,
-    artwork_path: Option<PathBuf>,
     pending_add: Option<Vec<Track>>,
     picker_return: Option<LibraryView>,
     confirm_delete: Option<i64>,
@@ -126,13 +125,13 @@ impl App {
             play_mode: false,
             show_help: false,
             theme: theme::theme_from_name(theme_name),
-            artwork: None,
             should_quit: false,
             status: String::new(),
+            help_query: String::new(),
+            help_selected: 0,
             player,
             db,
             indexer,
-            artwork_path: None,
             pending_add: None,
             picker_return: None,
             confirm_delete: None,
@@ -164,23 +163,55 @@ impl App {
         self.player.as_ref().and_then(Player::duration)
     }
 
-    /// Resolve (and cache) artwork for the current track.
-    fn refresh_artwork(&mut self) {
-        let Some(track) = self.current_track().cloned() else {
-            self.artwork = None;
-            self.artwork_path = None;
-            return;
-        };
-        if self.artwork_path.as_deref() == Some(track.path.as_path()) {
-            return;
-        }
-        self.artwork = Some(artwork::resolve(&track));
-        self.artwork_path = Some(track.path);
-    }
-
     /// Whether the app is capturing text (search query or a prompt).
     pub fn text_input_active(&self) -> bool {
         self.view == LibraryView::Search || self.prompt.is_some()
+    }
+
+    /// The input mode that determines how key events are interpreted.
+    pub fn input_mode(&self) -> InputMode {
+        if self.show_help {
+            InputMode::Help
+        } else if self.text_input_active() {
+            InputMode::Text
+        } else {
+            InputMode::Normal
+        }
+    }
+
+    /// The interaction context used by the contextual keybinding helper.
+    pub fn context(&self) -> Context {
+        if self.show_help {
+            Context::Help
+        } else if self.play_mode {
+            Context::PlayMode
+        } else if self.prompt.is_some() {
+            Context::TextInput
+        } else if self.picker_active() {
+            Context::Playlists
+        } else if self.open_playlist.is_some() {
+            Context::OpenPlaylist
+        } else if self.focus == Focus::Queue {
+            Context::Queue
+        } else {
+            match self.view {
+                LibraryView::Songs => Context::Songs,
+                LibraryView::Albums => Context::Albums,
+                LibraryView::Artists => Context::Artists,
+                LibraryView::Playlists => Context::Playlists,
+                LibraryView::Search => Context::Search,
+            }
+        }
+    }
+
+    /// The help entries visible for the current help query.
+    pub fn help_entries(&self) -> Vec<&'static keys::Binding> {
+        keys::search(&self.help_query)
+    }
+
+    /// Number of entries in the (filtered) help list.
+    pub fn help_len(&self) -> usize {
+        self.help_entries().len()
     }
 
     /// Whether a playlist picker is active (choosing a target playlist).
@@ -282,7 +313,6 @@ impl App {
     /// per UI frame.
     pub fn tick(&mut self) {
         self.drain_indexer();
-        self.refresh_artwork();
         if self.queue.is_empty() {
             return;
         }
@@ -305,6 +335,11 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: i32) {
+        if self.show_help {
+            self.help_selected = wrap_selection(self.help_selected, delta, self.help_len());
+            return;
+        }
+
         let (selected, len) = match self.focus {
             Focus::Library => (self.selected, self.library_len()),
             Focus::Queue => (self.queue_selected, self.queue.len()),
@@ -313,7 +348,7 @@ impl App {
             return;
         }
 
-        let next = (selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
+        let next = wrap_selection(selected, delta, len);
         match self.focus {
             Focus::Library => {
                 self.selected = next;
@@ -352,7 +387,10 @@ impl App {
     }
 
     fn type_char(&mut self, ch: char) {
-        if self.view == LibraryView::Search {
+        if self.show_help {
+            self.help_query.push(ch);
+            self.help_selected = 0;
+        } else if self.view == LibraryView::Search {
             self.search_query.push(ch);
             self.selected = 0;
             self.refresh_search();
@@ -362,7 +400,10 @@ impl App {
     }
 
     fn delete_char(&mut self) {
-        if self.view == LibraryView::Search {
+        if self.show_help {
+            self.help_query.pop();
+            self.help_selected = 0;
+        } else if self.view == LibraryView::Search {
             self.search_query.pop();
             self.selected = 0;
             self.refresh_search();
@@ -372,7 +413,14 @@ impl App {
     }
 
     fn cancel_text_input(&mut self) {
-        if self.view == LibraryView::Search {
+        if self.show_help {
+            if self.help_query.is_empty() {
+                self.show_help = false;
+            } else {
+                self.help_query.clear();
+                self.help_selected = 0;
+            }
+        } else if self.view == LibraryView::Search {
             self.view = LibraryView::Songs;
             self.search_query.clear();
             self.search_results.clear();
@@ -657,6 +705,8 @@ impl App {
 
     fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+        self.help_query.clear();
+        self.help_selected = 0;
     }
 
     fn cycle_theme(&mut self) {

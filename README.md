@@ -20,7 +20,7 @@ offline and without a server.
 - Playlists: create, rename, delete, duplicate, reorder, sort, add; M3U
   import/export with a summary of imported/skipped/missing paths.
 - Four themes (Rust & Walnut default, Catppuccin, Dracula, Nord), Play Mode,
-  an ASCII mascot, and an in-app help screen.
+  an animated ASCII termite mascot + equalizer, and an in-app help screen.
 - Read-only access to audio files; symlinks are ignored.
 
 ## Requirements
@@ -142,8 +142,8 @@ Run the app against a folder of real audio files and verify:
 6. **Playlists** — create/rename/duplicate/delete, reorder, sort, and M3U
    import/export.
 7. **Play Mode / themes** — toggle `m`, cycle `T`, open `?` help.
-8. **Artwork** — embedded art and folder images are detected (rendered as a
-   themed placeholder).
+8. **Play Mode** — toggle `m`; the termite mascot animates and the equalizer
+   bars move while playing and freeze when paused.
 9. **Error handling** — corrupt/unavailable files are skipped without crashing.
 10. **Terminal restore** — quit normally and via handled errors; the terminal is
     always restored.
@@ -159,8 +159,8 @@ cargo build --release --locked
 
 Automated tests cover configuration, database persistence/migrations, scanning,
 catalog grouping/sorting/search, queue operations (including shuffle/repeat),
-M3U parsing, artwork resolution, theme selection, and keyboard mapping. Tests
-that require an audio device or a real terminal are manual (above).
+M3U parsing, theme selection, and keyboard mapping. Tests that require an audio
+device or a real terminal are manual (above).
 
 ## Project structure
 
@@ -177,7 +177,6 @@ src/
   db.rs        SQLite persistence (index + playlists) and migrations
   config.rs    commented TOML preferences
   m3u.rs       M3U import/export
-  artwork.rs   artwork resolution (embedded / folder / placeholder)
   theme.rs     color themes
   player.rs    audio playback
   models.rs    shared types (Track, Queue, Action, ...)
@@ -190,15 +189,14 @@ packaging/
   build-deb.sh builds a Debian package into dist/
 tests/
   library_tests.rs  queue_tests.rs  cli_tests.rs  config_tests.rs
-  db_tests.rs  m3u_tests.rs  artwork_tests.rs
+  db_tests.rs  m3u_tests.rs  format_verify.rs
 ```
 
 ## Known limitations
 
 - **Opus is not decoded** by the pinned Rodio/Symphonia stack.
-- **Artwork is rendered as a themed placeholder**, not as pixels: displaying the
-  actual image requires an image-decoding dependency and a terminal image
-  protocol (kitty/sixel), which are not enabled.
+- **No image rendering**: Play Mode uses an animated ASCII equalizer + termite
+  mascot instead of real album artwork.
 - The filesystem watcher triggers a full rescan (debounced); very large
   libraries may see a brief pause while metadata is read in the background.
 - M3U import adds found paths to the index; tracks outside the library root are

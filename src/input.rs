@@ -2,14 +2,17 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::models::{Action, LibraryView};
+use crate::keys;
+use crate::models::{Action, InputMode};
 
-/// Map a crossterm key event to an [`Action`].
+/// Map a crossterm key event to an [`Action`], honouring the active input mode.
 ///
-/// When `text_mode` is true (search or a prompt is active), printable
-/// characters feed the text buffer instead of triggering normal bindings.
+/// Normal mode delegates to the centralized binding table in [`keys`]. Text
+/// mode (search query or prompt) and Help mode capture printable characters
+/// and only allow a small set of editing/navigation keys.
+///
 /// Returns `None` for unbound keys and for key release/repeat events.
-pub fn map_key(key: KeyEvent, text_mode: bool) -> Option<Action> {
+pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
@@ -18,84 +21,73 @@ pub fn map_key(key: KeyEvent, text_mode: bool) -> Option<Action> {
         return Some(Action::Quit);
     }
 
-    if text_mode {
-        return match key.code {
-            KeyCode::Up => Some(Action::SelectUp),
-            KeyCode::Down => Some(Action::SelectDown),
-            KeyCode::Char(ch) => Some(Action::TypeChar(ch)),
-            KeyCode::Backspace => Some(Action::DeleteChar),
-            KeyCode::Esc => Some(Action::Cancel),
-            KeyCode::Enter => Some(Action::Enter),
-            _ => None,
-        };
+    match mode {
+        InputMode::Normal => keys::lookup(&key),
+        InputMode::Text => text_keys(key.code),
+        InputMode::Help => help_keys(key.code),
     }
+}
 
-    let action = match key.code {
-        KeyCode::Up => Action::SelectUp,
-        KeyCode::Down => Action::SelectDown,
-        KeyCode::Tab => Action::NextFocus,
-        KeyCode::Enter => Action::Enter,
-        KeyCode::Esc | KeyCode::Backspace => Action::Back,
-        KeyCode::Char(' ') => Action::TogglePlay,
-        KeyCode::Char('n') => Action::NextTrack,
-        KeyCode::Char('p') => Action::PreviousTrack,
-        KeyCode::Char('+') | KeyCode::Char('=') => Action::VolumeUp,
-        KeyCode::Char('-') => Action::VolumeDown,
-        KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('r') => Action::Rescan,
-        KeyCode::Char('/') => Action::StartSearch,
-        KeyCode::Char('1') => Action::SwitchView(LibraryView::Songs),
-        KeyCode::Char('2') => Action::SwitchView(LibraryView::Albums),
-        KeyCode::Char('3') => Action::SwitchView(LibraryView::Artists),
-        KeyCode::Char('4') => Action::SwitchView(LibraryView::Playlists),
-        KeyCode::Char('a') => Action::AddToQueue,
-        KeyCode::Char('N') => Action::PlayNext,
-        KeyCode::Char('d') => Action::RemoveFromQueue,
-        KeyCode::Char('s') => Action::ToggleShuffle,
-        KeyCode::Char('R') => Action::CycleRepeat,
-        KeyCode::Char('m') => Action::TogglePlayMode,
-        KeyCode::Char('?') => Action::ToggleHelp,
-        KeyCode::Char('T') => Action::CycleTheme,
-        KeyCode::Char('c') => Action::NewPlaylist,
-        KeyCode::Char('e') => Action::Rename,
-        KeyCode::Char('D') => Action::Duplicate,
-        KeyCode::Char('x') => Action::Delete,
-        KeyCode::Char('P') => Action::AddToPlaylist,
-        KeyCode::Char('I') => Action::Import,
-        KeyCode::Char('E') => Action::Export,
-        KeyCode::Char('J') => Action::MoveDown,
-        KeyCode::Char('K') => Action::MoveUp,
-        KeyCode::Char('S') => Action::Sort,
-        _ => return None,
-    };
+fn text_keys(code: KeyCode) -> Option<Action> {
+    match code {
+        KeyCode::Up => Some(Action::SelectUp),
+        KeyCode::Down => Some(Action::SelectDown),
+        KeyCode::Char(ch) => Some(Action::TypeChar(ch)),
+        KeyCode::Backspace => Some(Action::DeleteChar),
+        KeyCode::Esc => Some(Action::Cancel),
+        KeyCode::Enter => Some(Action::Enter),
+        _ => None,
+    }
+}
 
-    Some(action)
+fn help_keys(code: KeyCode) -> Option<Action> {
+    match code {
+        KeyCode::Up => Some(Action::SelectUp),
+        KeyCode::Down => Some(Action::SelectDown),
+        KeyCode::Char('?') => Some(Action::ToggleHelp),
+        KeyCode::Esc => Some(Action::Cancel),
+        KeyCode::Backspace => Some(Action::DeleteChar),
+        KeyCode::Char(ch) => Some(Action::TypeChar(ch)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::map_key;
-    use crate::models::{Action, LibraryView};
+    use crate::models::{Action, InputMode, LibraryView};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
     fn q_quits_in_normal_mode() {
         let event = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-        assert_eq!(map_key(event, false), Some(Action::Quit));
+        assert_eq!(map_key(event, InputMode::Normal), Some(Action::Quit));
     }
 
     #[test]
     fn q_types_in_text_mode() {
         let event = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-        assert_eq!(map_key(event, true), Some(Action::TypeChar('q')));
+        assert_eq!(map_key(event, InputMode::Text), Some(Action::TypeChar('q')));
     }
 
     #[test]
     fn view_shortcuts_map_to_views() {
         let event = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE);
         assert_eq!(
-            map_key(event, false),
+            map_key(event, InputMode::Normal),
             Some(Action::SwitchView(LibraryView::Albums))
         );
+    }
+
+    #[test]
+    fn ctrl_c_quits_in_any_mode() {
+        let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(map_key(event, InputMode::Text), Some(Action::Quit));
+    }
+
+    #[test]
+    fn help_mode_feeds_query_not_shortcuts() {
+        let event = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(map_key(event, InputMode::Help), Some(Action::TypeChar('n')));
     }
 }

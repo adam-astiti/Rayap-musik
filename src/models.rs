@@ -7,6 +7,34 @@ use std::time::Duration;
 pub const UNKNOWN_ARTIST: &str = "Unknown artist";
 pub const UNKNOWN_ALBUM: &str = "Unknown album";
 
+/// How raw keyboard events are interpreted for the active interaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    /// Normal navigation and shortcuts.
+    #[default]
+    Normal,
+    /// Editing text (search query or a prompt).
+    Text,
+    /// Searching the Help page.
+    Help,
+}
+
+/// Wrap-around selection movement for a list of `len` items.
+///
+/// Returns `0` for empty and single-item lists. Otherwise moves `delta` steps
+/// from `current`, wrapping around both ends.
+pub fn wrap_selection(current: usize, delta: i32, len: usize) -> usize {
+    if len < 2 {
+        return 0;
+    }
+    let len = len as i32;
+    let mut next = (current as i32 + delta) % len;
+    if next < 0 {
+        next += len;
+    }
+    next as usize
+}
+
 /// Which panel currently owns keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
@@ -407,5 +435,30 @@ impl LibraryView {
             LibraryView::Playlists => "Playlists",
             LibraryView::Search => "Search",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_selection;
+
+    #[test]
+    fn wrap_handles_empty_and_single() {
+        assert_eq!(wrap_selection(0, -1, 0), 0);
+        assert_eq!(wrap_selection(0, 1, 1), 0);
+    }
+
+    #[test]
+    fn wrap_moves_forward_and_backward() {
+        assert_eq!(wrap_selection(0, 1, 3), 1);
+        assert_eq!(wrap_selection(2, 1, 3), 0, "last wraps to first");
+        assert_eq!(wrap_selection(0, -1, 3), 2, "first wraps to last");
+        assert_eq!(wrap_selection(1, -1, 3), 0);
+    }
+
+    #[test]
+    fn wrap_handles_multi_step() {
+        assert_eq!(wrap_selection(0, 5, 3), 2);
+        assert_eq!(wrap_selection(1, -3, 3), 1);
     }
 }
