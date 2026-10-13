@@ -184,22 +184,8 @@ persisted; the volume and theme are saved when the app exits.
 
 The main screen is split into panels:
 
-```
-┌─ Now Playing ─────────────────────────────┐
-│ <title>                                   │
-│ <artist>  |  <album>                      │
-│ ♪ <equalizer>   (Playing)                 │
-├─ Progress ────────────────────────────────┤
-│ 01:23 / 04:05   █████▏░░░░░░░   70% ▮▮▮▮▮▮▮▯▯▯   Shuffle:off ⇄  Repeat:Off ↻
-├─ Songs ──────────────┬─ Queue ────────────┤
-│ > Artist — Title     │ >  1. Title        │
-│   Artist — Title     │    2. Title        │
-├─ Status ──────────────────────────────────┤
-│ <status message>   (^_^)                   │
-├─ Keys ────────────────────────────────────┤
-│ Enter Play Now / open   a Add to queue   …│
-└───────────────────────────────────────────┘
-```
+<img width="1893" height="1105" alt="image" src="https://github.com/user-attachments/assets/e7f3ee90-b6c3-4ad8-8b90-c18069d53b5f" />
+
 
 - **Library panel** (left): the active view — Songs, Albums, Artists,
   Playlists, a detail view, or Search.
