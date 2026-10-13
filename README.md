@@ -184,7 +184,8 @@ persisted; the volume and theme are saved when the app exits.
 
 The main screen is split into panels:
 
-<img width="1893" height="1105" alt="image" src="https://github.com/user-attachments/assets/e7f3ee90-b6c3-4ad8-8b90-c18069d53b5f" />
+<img width="1893" height="1105" alt="image" src="https://github.com/user-attachments/assets/935d1c05-e9b7-4c40-b771-a739ec99059a" />
+
 
 
 - **Library panel** (left): the active view — Songs, Albums, Artists,
